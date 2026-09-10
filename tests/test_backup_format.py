@@ -27,10 +27,11 @@ import pytest
 
 import mareforma
 from mareforma import restore
+from mareforma.db.errors import RestoreError
 from mareforma.db.core import (
     _BACKUP_FORMAT, tables_below_completeness, verify_completeness_digest,
 )
-from tests._helpers import _bootstrap_key, _enroll_key
+from tests._helpers import _bootstrap_key, _enroll_key, rewrite_backup
 
 try:
     import tomllib          # 3.11+ stdlib
@@ -79,12 +80,17 @@ def _restore_into(source: Path, target: Path) -> tuple[dict, list[str]]:
     Copied rather than re-serialized: re-serializing changes the body bytes and
     breaks the digest on its own, which would make every case here look caught
     for the wrong reason.
+
+    Takes the override, because these tests are about what a reader SAYS about a
+    file. Whether it also refuses is a different question, asked in its own
+    class below, and letting the refusal land here would stop every one of these
+    before it could read the sentence it exists to check.
     """
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy(source, target / "claims.toml")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        report = restore(target)
+        report = restore(target, trust_unaccounted_backup=True)
     return report, [
         str(w.message) for w in caught if "claims.toml at" in str(w.message)
     ]
@@ -414,14 +420,35 @@ class TestAStampCannotBuySilence:
         bumped = self._truncated(tmp_path, _BACKUP_FORMAT + 1)
         assert set(_reasons_for(bumped)) == {"format_ahead", "completeness_absent"}
 
-    def test_the_operator_is_still_told_to_take_the_backup_again(
+    def test_the_missing_rows_are_named_beside_the_later_format(
         self, tmp_path: Path,
     ) -> None:
         """The half that made this worse than silence: the wording."""
         bumped = self._truncated(tmp_path, _BACKUP_FORMAT + 1)
-        _, said = _restore_into(bumped, tmp_path / "recovered")
-        assert said
-        assert "Take the backup again" in said[0]
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(bumped, target / "claims.toml")
+        # The disclosure runs before the refusal, so both surfaces are read
+        # from the one call: the sentence the operator sees first, and the
+        # exception that stops them.
+        with warnings.catch_warnings(record=True) as spoken:
+            warnings.simplefilter("always")
+            with pytest.raises(RestoreError) as caught:
+                restore(target)
+
+        # The later format is why it stops, and the missing rows are still
+        # named. Reporting only the first was the shape that let one character
+        # turn a truncated backup into a reassuring sentence, and a refusal
+        # that swallows the loss is that mistake wearing an exception.
+        said = str(caught.value)
+        assert "later than this release understands" in said
+        assert "completeness_absent" in said
+
+        # The warning must not promise a graph the refusal is about to deny.
+        warned = [str(w.message) for w in spoken if "claims.toml at" in str(w.message)]
+        assert warned
+        assert "Take the backup again" in warned[0]
+        assert "The restored graph is what survived" not in warned[0]
 
 
 class TestLineEndingsDoNotHideAnything:
@@ -539,9 +566,13 @@ class TestAFormatThisReleaseDoesNotKnow:
         assert verify_completeness_digest(ahead)
         assert "completeness" in tomllib.loads(ahead.read_text())
         assert _reasons_for(ahead) == ("format_ahead",)
-        _, said = _restore_into(ahead, tmp_path / "recovered")
-        assert said, "a file from a later format restored without a word"
-        assert "disagrees with itself" not in said[0]
+
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(ahead, target / "claims.toml")
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        assert caught.value.kind == "format_ahead"
 
     def test_a_later_stamp_is_not_called_tampering(self, tmp_path: Path) -> None:
         """A number above this release's own is not evidence of an edit.
@@ -559,14 +590,20 @@ class TestAFormatThisReleaseDoesNotKnow:
         ahead = tmp_path / "ahead.toml"
         ahead.write_text(tomli_w.dumps(doc))
 
-        report, said = _restore_into(ahead, tmp_path / "recovered")
-        assert report["claims_restored"] == 3
-        assert said, "a file from an unknown format restored without a word"
-        assert "later than the format" in said[0]
-        # The missing table is still reported. Saying only "this is newer" about
-        # a file that has lost its own account of itself is a misdirection, and
-        # the reasons carry both so a caller can tell them apart.
         assert set(_reasons_for(ahead)) == {"format_ahead", "completeness_absent"}
+
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(ahead, target / "claims.toml")
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        said = str(caught.value)
+        # Refused for being newer, not for being tampered with, and the
+        # override does not apply: this release cannot say what that file owes.
+        assert caught.value.kind == "format_ahead"
+        assert "Restore it with the release that wrote it" in said
+        # Refused for being newer, and the missing table still named beside it.
+        assert "completeness_absent" in said
 
     @pytest.mark.parametrize("value", [0, "1", 1.0, True, []])
     def test_a_stamp_of_any_other_shape_still_owes_a_table(
@@ -712,6 +749,34 @@ class TestTheReasonsAreTyped:
         assert _reasons_for(ahead) == ("format_ahead",)
 
 
+def _a_backup_with_a_planted_link(tmp_path: Path) -> Path:
+    """A claims.toml carrying a chain that does not check out.
+
+    Written into the file rather than into the graph. The writer stops at
+    the first link that does not verify, so a backup it produced can no
+    longer carry one; a file somebody edited still can, and that is the
+    case these refusals are for.
+    """
+    import tomli_w
+
+    home = tmp_path / "src"
+    home.mkdir()
+    _project_with_a_verdict(home)
+    with mareforma.open(home, key_path=home / "root.key") as graph:
+        graph.assert_claim("a later claim", generated_by="after")
+    assert (home / "claims.toml.prev").is_file()
+
+    doc = tomllib.loads((home / "claims.toml").read_text())
+    doc["verdict_chain"]["99"] = {
+        "prev_tip": "x", "tip": "junk", "verdict_kind": "contradiction",
+        "verdict_id": "nope", "verdict_digest": "nope",
+        "issuer_keyid": "nokey", "signature": "AA==",
+        "created_at": "2026-09-07T00:00:00+00:00",
+    }
+    rewrite_backup(home / "claims.toml", doc)
+    return home
+
+
 class TestARotatedCopyIsNamedWhenItCouldHelp:
     """The recovery the accepted risk rested on, made real.
 
@@ -729,40 +794,24 @@ class TestARotatedCopyIsNamedWhenItCouldHelp:
     recommending it.
     """
 
-    def _poisoned(self, tmp_path: Path) -> Path:
-        import sqlite3
-
-        home = tmp_path / "src"
-        home.mkdir()
-        _project_with_a_verdict(home)
-
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        raw.execute(
-            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
-            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
-            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
-            "'nokey', X'00', '2026-09-03T00:00:00+00:00')"
-        )
-        raw.commit()
-        raw.close()
-
-        # One honest mutation, which is all it takes for the backup to carry
-        # the planted row into the recovery artifact.
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("written after the plant", generated_by="after")
-        assert (home / "claims.toml.prev").is_file()
-        return home
 
     def test_the_previous_copy_is_named(self, tmp_path: Path) -> None:
-        home = self._poisoned(tmp_path)
+        home = _a_backup_with_a_planted_link(tmp_path)
         target = tmp_path / "recovered"
         target.mkdir()
         shutil.copy(home / "claims.toml", target / "claims.toml")
         shutil.copy(home / "claims.toml.prev", target / "claims.toml.prev")
 
+        # Refused first, because a chain that does not account for its
+        # verdicts is a graph rebuilt short of one. The message is what this
+        # test is about, so it asks again saying the edit was meant.
+        with pytest.raises(RestoreError) as refused:
+            restore(target)
+        assert refused.value.kind == "verdict_chain_broken"
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            restore(target)
+            restore(target, trust_unaccounted_backup=True)
         said = [
             str(w.message) for w in caught
             if "verdict chain restored" in str(w.message)
@@ -784,14 +833,14 @@ class TestARotatedCopyIsNamedWhenItCouldHelp:
         nothing. Deleting that file is free, and it is the first thing worth
         deleting.
         """
-        home = self._poisoned(tmp_path)
+        home = _a_backup_with_a_planted_link(tmp_path)
         target = tmp_path / "recovered"
         target.mkdir()
         shutil.copy(home / "claims.toml", target / "claims.toml")
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            restore(target)
+            restore(target, trust_unaccounted_backup=True)
         said = [
             str(w.message) for w in caught
             if "verdict chain restored" in str(w.message)
@@ -904,22 +953,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
     def test_a_restore_survives_a_caller_that_raises_on_warnings(
         self, tmp_path: Path,
     ) -> None:
-        import sqlite3
-
-        home = tmp_path / "src"
-        home.mkdir()
-        _project_with_a_verdict(home)
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        raw.execute(
-            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
-            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
-            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
-            "'nokey', X'00', '2026-09-03T00:00:00+00:00')"
-        )
-        raw.commit()
-        raw.close()
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("after the plant", generated_by="after")
+        home = _a_backup_with_a_planted_link(tmp_path)
 
         target = tmp_path / "recovered"
         target.mkdir()
@@ -928,7 +962,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            report = restore(target)
+            report = restore(target, trust_unaccounted_backup=True)
 
         assert report["claims_restored"] == 3
         assert (target / ".mareforma").is_dir(), (
@@ -939,22 +973,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
         self, tmp_path: Path,
     ) -> None:
         """Quoting the first of five drops the more alarming ones."""
-        import sqlite3
-
-        home = tmp_path / "src"
-        home.mkdir()
-        _project_with_a_verdict(home)
-        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
-        raw.execute(
-            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
-            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
-            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
-            "'nokey', X'00', '2026-09-03T00:00:00+00:00')"
-        )
-        raw.commit()
-        raw.close()
-        with mareforma.open(home, key_path=home / "root.key") as graph:
-            graph.assert_claim("after the plant", generated_by="after")
+        home = _a_backup_with_a_planted_link(tmp_path)
 
         target = tmp_path / "recovered"
         target.mkdir()
@@ -963,7 +982,7 @@ class TestTheDisclosureNeverCostsTheRecovery:
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            restore(target)
+            restore(target, trust_unaccounted_backup=True)
         said = [
             str(w.message) for w in caught
             if "verdict chain restored" in str(w.message)
@@ -1060,3 +1079,306 @@ class TestTheCheckDoesNotDependOnWhereBytesSit:
         assert tables_below_completeness(with_tail) == ("rekor_inclusions",), (
             "the tail reader lost the boundary on a file with CRLF endings"
         )
+
+
+class TestWhatARefusalCosts:
+    """The release that binds these artifacts, and what it must not break.
+
+    The release before this one only disclosed. It could not refuse, because
+    the population it would have refused was holding files written before the
+    format and taking their recovery away for a rule they never had is not a
+    trade worth making. That window is closed now, and a witness nobody acts on
+    is a witness nobody needs.
+    """
+
+    def _short_by_one(self, tmp_path: Path) -> Path:
+        raw = _healthy_project(tmp_path).read_text()
+        first = raw.index("[claims.")
+        second = raw.index("[claims.", first + 1)
+        third = raw.index("[claims.", second + 1)
+        out = tmp_path / "short.toml"
+        out.write_text(raw[:second] + raw[third:])
+        return out
+
+    def _restore(self, source: Path, target: Path, **kw):
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target / "claims.toml")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return restore(target, **kw)
+
+    def test_a_backup_that_cannot_account_for_itself_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        with pytest.raises(RestoreError) as caught:
+            self._restore(self._short_by_one(tmp_path), tmp_path / "r")
+        assert caught.value.kind == "backup_unaccounted"
+
+    def test_the_refusal_changes_nothing_on_disk(self, tmp_path: Path) -> None:
+        """A refusal is not a half-restore. The graph a failed recovery leaves
+        behind is the one an operator tries the next thing with."""
+        target = tmp_path / "r"
+        with pytest.raises(RestoreError):
+            self._restore(self._short_by_one(tmp_path), target)
+        assert not (target / ".mareforma").exists()
+
+    def test_an_operator_who_edited_it_can_still_recover(
+        self, tmp_path: Path,
+    ) -> None:
+        """The other direction, and the reason the override exists.
+
+        This is the recovery path. Its threat model includes somebody who
+        repaired a corrupt row by hand, and refusing them their own graph over
+        an edit they made deliberately is the same failure pointed the other
+        way. The refusal names the flag so taking it is a decision.
+        """
+        report = self._restore(
+            self._short_by_one(tmp_path), tmp_path / "r",
+            trust_unaccounted_backup=True,
+        )
+        assert report["claims_restored"] == 2
+
+    def test_a_backup_written_before_the_format_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        """The compatibility this refusal must not cost.
+
+        Every backup written before the completeness table carries neither it
+        nor the stamp, reaches none of these reasons, and restores untouched.
+        Without that, binding the witness would refuse every file anyone was
+        already holding.
+        """
+        import tomli_w
+
+        doc = tomllib.loads(_healthy_project(tmp_path).read_text())
+        doc.pop("backup_format", None)
+        doc.pop("completeness")
+        legacy = tmp_path / "legacy.toml"
+        legacy.write_text(tomli_w.dumps(doc))
+
+        report = self._restore(legacy, tmp_path / "r")
+        assert report["claims_restored"] == 3
+
+    def test_an_untouched_backup_still_restores(self, tmp_path: Path) -> None:
+        report = self._restore(_healthy_project(tmp_path), tmp_path / "r")
+        assert report["claims_restored"] == 3
+
+    def test_a_tampered_row_still_reports_the_row(self, tmp_path: Path) -> None:
+        """The precise violation wins over the general one.
+
+        Editing a claim breaks its signature and the file's digest at once.
+        Refusing on the digest first made "cannot account for itself" the
+        answer to a forged signature, a swapped statement id and an orphan
+        signer alike, which is a worse sentence than the one it replaced.
+        """
+        source = _healthy_project(tmp_path)
+        raw = source.read_text()
+        edited = tmp_path / "edited.toml"
+        edited.write_text(raw.replace("the first finding", "the FIRST finding"))
+
+        with pytest.raises(RestoreError) as caught:
+            self._restore(edited, tmp_path / "r")
+        assert caught.value.kind == "claim_unverified"
+
+
+class TestABackupCannotHideADeletedVerdict:
+    """The half of drop-guard-delete-verdict that survives everything else.
+
+    The guard reconciler and the contestation replay both speak about rows
+    that are still there, so a verdict deleted out of a backup used to rebuild
+    a graph that never had it and report clean. Nothing in the file disagreed,
+    because nothing in the file spoke about which rows were meant to be in it.
+    """
+
+    def _with_a_verdict_removed(self, tmp_path: Path) -> Path:
+        """An honest backup with one verdict taken out of the file.
+
+        Out of the file rather than out of the graph, because the writer stops
+        at the first chain link that does not check out and would leave the
+        orphaned link behind rather than write it. Somebody editing the file
+        they were handed is the case this refusal answers.
+        """
+        home = tmp_path / "src"
+        home.mkdir()
+        _project_with_a_verdict(home)
+
+        doc = tomllib.loads((home / "claims.toml").read_text())
+        assert doc["contradiction_verdicts"].pop("v1", None) is not None
+        rewrite_backup(home / "claims.toml", doc)
+        return home / "claims.toml"
+
+    def test_the_restore_is_refused(self, tmp_path: Path) -> None:
+        source = self._with_a_verdict_removed(tmp_path)
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(source, target / "claims.toml")
+
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        assert caught.value.kind == "verdict_chain_broken"
+        assert not (target / ".mareforma").exists()
+
+    def test_a_graph_whose_verdicts_predate_the_chain_still_restores(
+        self, tmp_path: Path,
+    ) -> None:
+        """The compatibility this refusal must not cost.
+
+        Verdicts recorded before the chain existed carry no links. The chain
+        covers a suffix that begins where it begins, so a backup full of them
+        reports nothing and restores untouched. Without that, binding the chain
+        would refuse every project that recorded a verdict before it shipped.
+        """
+        import sqlite3
+
+        home = tmp_path / "legacy"
+        home.mkdir()
+        _project_with_a_verdict(home)
+
+        # A verdict with no link is what a pre-chain graph looks like.
+        raw = sqlite3.connect(home / ".mareforma" / "graph.db")
+        raw.execute("DROP TRIGGER IF EXISTS verdict_chain_no_delete")
+        raw.execute("DELETE FROM verdict_chain")
+        raw.commit()
+        raw.close()
+        with mareforma.open(home, key_path=home / "root.key") as graph:
+            graph.assert_claim("later", generated_by="after")
+
+        target = tmp_path / "recovered"
+        target.mkdir()
+        shutil.copy(home / "claims.toml", target / "claims.toml")
+        report = restore(target)
+        assert report["claims_restored"] == 3
+
+
+class TestEveryReasonActuallyRefuses:
+    """One case per fatal reason, asserting the refusal rather than the wording.
+
+    Every test above that produces these reasons reads what the file SAYS, so
+    it takes the override, and the refusal went unasserted for five of the
+    seven. Each could be quietly demoted to a warning with the suite still
+    green. Two of them are the forgeries the checks were written for: a section
+    smuggled in below the digest boundary, and the decoy header that hid one
+    from the byte reader.
+    """
+
+    def _refused(self, source: Path, target: Path) -> str:
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target / "claims.toml")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(RestoreError) as caught:
+                restore(target)
+        assert not (target / ".mareforma").exists()
+        return caught.value.kind
+
+    def _forged(self, tmp_path: Path, tail: str = "") -> Path:
+        raw = _healthy_project(tmp_path).read_text()
+        claim_id = sorted(tomllib.loads(raw)["claims"])[0]
+        out = tmp_path / f"forged{len(tail)}.toml"
+        out.write_text(
+            raw + f'\n[rekor_inclusions."{claim_id}"]\n'
+            'uuid = "an-entry-that-was-never-submitted"\n'
+            'raw_response_b64 = "eyJhIjp7ImJvZHkiOiJ4In19"\n'
+            "log_index = 99\nintegrated_time = 1\n"
+            'recorded_at = "2026-08-31T00:00:00+00:00"\n' + tail,
+            newline="",
+        )
+        return out
+
+    def test_a_section_smuggled_below_the_table_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The forged transparency-log entry, refused rather than reported.
+
+        Left to a warning it restored into the graph and marked a real claim
+        logged, with the digest still verifying.
+        """
+        source = self._forged(tmp_path)
+        assert "content_below_table" in _reasons_for(source)
+        assert self._refused(source, tmp_path / "r1") == "backup_unaccounted"
+
+    def test_the_decoy_header_forgery_is_refused(self, tmp_path: Path) -> None:
+        """The bypass that cost 274 bytes and no key, refused."""
+        source = self._forged(tmp_path, 'note = """\r\n[completeness]\r\n# """\n')
+        assert "section_not_declared" in _reasons_for(source)
+        assert self._refused(source, tmp_path / "r2") == "backup_unaccounted"
+
+    def test_an_unreadable_tail_is_refused(self, tmp_path: Path) -> None:
+        source = _healthy_project(tmp_path)
+        moved = tmp_path / "moved.toml"
+        moved.write_text(
+            source.read_text()
+            + '\n[rekor_inclusions."x"]\n'
+            + 'note = """\n[completeness]\nstill inside the string\n"""\n'
+        )
+        assert "tail_unparseable" in _reasons_for(moved)
+        assert self._refused(moved, tmp_path / "r3") == "backup_unaccounted"
+
+    def test_a_table_stripped_of_its_row_counts_is_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        source = _healthy_project(tmp_path)
+        head, _, table = source.read_text().partition("\n[completeness]\n")
+        bare = tmp_path / "bare.toml"
+        bare.write_text(
+            f"{head}\n[completeness]\n{table.split('[completeness.sections]')[0]}"
+        )
+        assert "row_counts_absent" in _reasons_for(bare)
+        assert self._refused(bare, tmp_path / "r4") == "backup_unaccounted"
+
+    def test_a_retyped_row_count_is_refused(self, tmp_path: Path) -> None:
+        """The careful edit, held to the same answer as the clumsy one."""
+        import hashlib
+
+        raw = _healthy_project(tmp_path).read_text()
+        first = raw.index("[claims.")
+        second = raw.index("[claims.", first + 1)
+        third = raw.index("[claims.", second + 1)
+        short = (raw[:second] + raw[third:]).replace("claims = 3", 'claims = "3"', 1)
+        body, sep, tail = short.partition("\n[completeness]\n")
+        digest = hashlib.sha256((body + "\n").encode("utf-8")).hexdigest()
+        out = tmp_path / "retyped.toml"
+        out.write_text(body + sep + re.sub(
+            r'digest = "[0-9a-f]+"', f'digest = "{digest}"', tail, count=1,
+        ))
+        assert "row_count_not_a_number" in _reasons_for(out)
+        assert self._refused(out, tmp_path / "r5") == "backup_unaccounted"
+
+    def test_a_declared_section_below_the_table_is_still_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The counts sit below the digest boundary, so naming the smuggled
+        section in them is free and silences the declaration check.
+
+        What still answers is where the bytes are. Isolated deliberately: the
+        two checks cover each other, and a fixture that trips both cannot show
+        that either one works.
+        """
+        raw = _healthy_project(tmp_path).read_text()
+        claim_id = sorted(tomllib.loads(raw)["claims"])[0]
+        out = tmp_path / "declared.toml"
+        out.write_text(
+            (raw + f'\n[rekor_inclusions."{claim_id}"]\n'
+             'uuid = "an-entry-that-was-never-submitted"\n'
+             'raw_response_b64 = "eyJhIjp7ImJvZHkiOiJ4In19"\n'
+             "log_index = 99\nintegrated_time = 1\n"
+             'recorded_at = "2026-08-31T00:00:00+00:00"\n'
+             ).replace("claims = 3", "claims = 3\nrekor_inclusions = 1", 1),
+            newline="",
+        )
+        assert _reasons_for(out) == ("content_below_table",)
+        assert self._refused(out, tmp_path / "r6") == "backup_unaccounted"
+
+    def test_an_unreadable_tail_alone_is_refused(self, tmp_path: Path) -> None:
+        """Isolated the same way, and the digest is not what answers: it is
+        excluded from the fatal set on purpose."""
+        raw = _healthy_project(tmp_path).read_text()
+        out = tmp_path / "tail-only.toml"
+        out.write_text(
+            (raw + '\n[rekor_inclusions."x"]\n'
+             'note = """\n[completeness]\nstill inside the string\n"""\n'
+             ).replace("claims = 3", "claims = 3\nrekor_inclusions = 1", 1),
+            newline="",
+        )
+        assert set(_reasons_for(out)) == {"digest_mismatch", "tail_unparseable"}
+        assert self._refused(out, tmp_path / "r7") == "backup_unaccounted"

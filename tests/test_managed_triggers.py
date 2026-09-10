@@ -29,7 +29,7 @@ from mareforma.db._schema_sql import (
     _EXPECTED_TRIGGER_TABLES,
     _MANAGED_TRIGGERS,
 )
-from mareforma.db.core import open_db, schema_census_missing
+from mareforma.db.core import _SCHEMA_VERSION, open_db, schema_census_missing
 from tests._helpers import _bootstrap_key
 
 # The guards that were reconciled before this, so the ones that were not are
@@ -334,7 +334,9 @@ class TestTheCensusStoreCannotBeEmptied:
             assert "findings_no_delete" in schema_census_missing(conn), (
                 "zeroing user_version skipped the census"
             )
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0] == _SCHEMA_VERSION
         finally:
             conn.close()
 

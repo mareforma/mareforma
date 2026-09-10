@@ -105,21 +105,3 @@ def test_untampered_policy_is_not_flagged(tmp_path: Path) -> None:
     assert report.traffic_light != "yellow" or "policy" not in report.rationale.lower()
 
 
-def test_policy_stall_does_not_mask_a_forged_promotion() -> None:
-    """The policy overlay is added to the claim-census reason, not substituted.
-
-    A project with both a tampered policy and a promoted claim that no longer
-    re-verifies must surface both on `status`; the forged-promotion warning was
-    the pre-existing signal and cannot be hidden by the new one.
-    """
-    report = HealthReport(
-        claims_open=1,
-        support_level_breakdown={"REPLICATED": 1},
-        standing_promoted=1,
-        failed_verification=1,
-        policy_unverified=True,
-    )
-    light, rationale = _compute_traffic_light(report)
-    assert light == "yellow"
-    assert "do not re-verify" in rationale
-    assert "policy" in rationale.lower()

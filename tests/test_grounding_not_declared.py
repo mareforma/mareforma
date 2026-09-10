@@ -69,20 +69,6 @@ def test_hand_built_grounded_dict_is_not_stored_as_grounded(tmp_path):
     assert record["provenance"] == "DECLARED"
 
 
-def test_hand_built_grounded_dict_does_not_promote(tmp_path):
-    # The promotion gate reads the stored column, so the neutralised state has
-    # to be what the gate sees, not a separate flag a read surface might miss.
-    from mareforma.db import _observed_grounding_promotes
-
-    csv = _dataset(tmp_path)
-    with open_graph(tmp_path) as g:
-        cid = g.assert_claim(
-            "a declared finding", observed_grounding=_hand_built(str(csv)),
-        )
-        row = g._conn.execute(
-            "SELECT observed_grounding FROM claims WHERE claim_id = ?", (cid,)
-        ).fetchone()
-    assert _observed_grounding_promotes(row["observed_grounding"]) is False
 
 
 def test_hand_built_verdict_object_is_not_stored_as_grounded(tmp_path):

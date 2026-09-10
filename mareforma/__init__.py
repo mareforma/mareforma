@@ -1,7 +1,7 @@
 """Mareforma: local verification layer for AI-assisted research."""
 
 __description__ = "Mareforma: local verification layer for AI-assisted research."
-__version__ = "0.3.14"
+__version__ = "0.4.0"
 
 from pathlib import Path
 
@@ -45,7 +45,6 @@ def open(  # noqa: A001
     trust_insecure_rekor: bool = False,
     rekor_log_pubkey_pem: "bytes | None" = None,
     rekor_log_pubkey_path: "str | Path | None" = None,
-    strict_promotion: bool = False,
     validator_type: str = "human",
 ) -> "EpistemicGraph":
     """Open the epistemic graph at *path* and return an EpistemicGraph.
@@ -79,10 +78,10 @@ def open(  # noqa: A001
         to Rekor at INSERT time; the entry uuid + logIndex are attached to
         the signature bundle and ``transparency_logged`` is set to 1.
         Submission failure persists the claim with ``transparency_logged=0``
-        and blocks REPLICATED promotion (mirrors the DOI ``unresolved``
-        pattern). ``EpistemicGraph.refresh_unsigned()`` retries the
-        pending entries. ``None`` (default) disables Rekor entirely: signed
-        claims still REPLICATE based on the local signature alone.
+        (mirrors the DOI ``unresolved`` pattern), so nothing outside this
+        machine witnesses the signature. ``EpistemicGraph.refresh_unsigned()``
+        retries the pending entries. ``None`` (default) disables Rekor
+        entirely: a signed claim still carries its local signature.
         Use :data:`mareforma.signing.PUBLIC_REKOR_URL` for the public
         sigstore instance.
     require_rekor:
@@ -109,28 +108,12 @@ def open(  # noqa: A001
         PEM file. The two are mutually exclusive. If neither is
         supplied AND ``<root>/.mareforma/rekor_log_pubkey.pem`` exists
         from a prior open(), it is loaded automatically.
-    strict_promotion:
-        When True, REPLICATED promotion also requires non-NULL
-        ``artifact_hash`` on BOTH sides of a converging pair, an operator
-        who wants data-distinctness as a hard gate, not just distinct
-        signers. Off by default (the default rule promotes on the
-        distinct-signer axis alone; absent data never blocks). Opt-in and
-        additive: it never loosens the default, only adds the data-presence
-        requirement.
-
-        Passing True DECLARES the rule on the project: the root validator
-        signs a one-way ``project_policy`` row, and every later opener,
-        including the CLI, promotes under it whether or not it passes the
-        flag. That makes it a property of the project rather than of the
-        handle. Only the root key can declare it, so a keyless or non-root
-        caller raises :class:`mareforma.ProjectPolicyError` instead of
-        receiving a gate that binds nothing but its own writes.
     validator_type:
         ``'human'`` or ``'llm'``, the self-declared type recorded if this key
         auto-enrolls as the project's root validator. Ignored once a root
         exists. An autonomous agent bootstrapping its own project should pass
-        ``'llm'``: an ``llm`` validator cannot promote a claim to ESTABLISHED on
-        its signature alone. The default is ``'human'`` for compatibility, and a
+        ``'llm'``: an ``llm`` validator cannot sign off on a claim. The
+        default is ``'human'`` for compatibility, and a
         defaulted type carries no weight on the trust map's independence axis.
 
     Returns
@@ -368,7 +351,6 @@ def open(  # noqa: A001
             trust_insecure_rekor=trust_insecure_rekor,
             rekor_log_pubkey_pem=rekor_log_pubkey_pem,
             rekor_key_provenance=rekor_key_provenance,
-            strict_promotion=strict_promotion,
             validator_type=validator_type,
         )
     except BaseException:
@@ -377,7 +359,7 @@ def open(  # noqa: A001
 
 
 def schema() -> dict:
-    """Return the mareforma epistemic schema: valid values and state transitions.
+    """Return the mareforma epistemic schema: the valid values a claim can hold.
 
     Intended for agents that need to reason about the system before calling it.
     The returned dict is stable across patch releases; fields are only added,
@@ -388,60 +370,30 @@ def schema() -> dict:
     dict with keys:
         schema_version  : int, schema version stored in graph.db
         classifications : list[str], valid classification values
-        support_levels  : list[str], valid support_level values, ordered low→high
         statuses        : list[str], valid claim status values
         defaults        : dict, default value for each field at assert_claim() time
-        transitions     : list[dict], valid support_level state transitions
 
     Example
     -------
     >>> s = mareforma.schema()
     >>> s["classifications"]
     ['INFERRED', 'ANALYTICAL', 'DERIVED']
-    >>> s["transitions"]
-    [{'from': 'PRELIMINARY', 'to': 'REPLICATED', ...}, ...]
     """
     from mareforma.db import (
         _SCHEMA_VERSION,
         VALID_CLASSIFICATIONS,
-        VALID_SUPPORT_LEVELS,
         VALID_STATUSES,
     )
 
     return {
         "schema_version": _SCHEMA_VERSION,
         "classifications": list(VALID_CLASSIFICATIONS),
-        "support_levels": list(VALID_SUPPORT_LEVELS),
         "statuses": list(VALID_STATUSES),
         "defaults": {
             "classification": "INFERRED",
-            "support_level": "PRELIMINARY",
             "status": "open",
             "generated_by": "agent",  # EpistemicGraph default
         },
-        "transitions": [
-            {
-                "from": "PRELIMINARY",
-                "to": "REPLICATED",
-                "trigger": "automatic",
-                "condition": (
-                    "≥2 claims signed by different validator keys (distinct "
-                    "asserter keyids, the per-claim signing key, not the agent "
-                    "label) support the same ESTABLISHED upstream claim_id in "
-                    "supports[]; each claim must be transparency-logged, "
-                    "grounded, and free of a signed contradiction verdict"
-                ),
-            },
-            {
-                "from": "REPLICATED",
-                "to": "ESTABLISHED",
-                "trigger": "validator",
-                "condition": (
-                    "graph.validate(claim_id) by an enrolled validator whose "
-                    "key signed neither converging claim, no automated path"
-                ),
-            },
-        ],
     }
 
 
@@ -454,6 +406,7 @@ def restore(
     claims_toml: "str | Path | None" = None,
     rekor_log_pubkey_pem: "bytes | None" = None,
     enforce_rekor_policy: bool = False,
+    trust_unaccounted_backup: bool = False,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -495,7 +448,8 @@ def restore(
     Returns
     -------
     dict
-        ``{"validators_restored": N, "claims_restored": M}``.
+        ``{"validators_restored": N, "claims_restored": M,
+        "unsigned_in_signed_mode": U, "verdict_chain_withheld": W}``.
 
     Raises
     ------
@@ -504,8 +458,27 @@ def restore(
         toml_not_found, toml_unreadable, toml_malformed,
         enrollment_unverified, claim_unverified, trust_row_rejected,
         mode_inconsistent, orphan_signer, rekor_inclusion_invalid,
-        policy_unverified, policy_absent, policy_unverifiable, or
-        policy_violation.
+        policy_unverified, policy_absent, policy_unverifiable,
+        policy_violation, backup_unaccounted, format_ahead,
+        verdict_chain_broken, verdict_chain_cut_short, or
+        grounding_unattested.
+
+    A backup whose completeness table does not match what the file holds is
+    refused as ``backup_unaccounted``: it says what it should contain and
+    does not contain it, so the rebuilt graph would be short rows with
+    nothing recording that they were ever there. Pass
+    ``trust_unaccounted_backup=True`` to restore such a file anyway, which
+    is the path for an operator who edited it deliberately. A backup from a
+    later format is refused as ``format_ahead`` and the override does not
+    apply, because this release cannot say what that file owes.
+
+    Two more refusals bind what the backup carries beside its rows. A
+    verdict taken out of the file leaves a chain that no longer accounts
+    for the set, refused as ``verdict_chain_broken``. A GROUNDED
+    observed-grounding axis arriving with nothing attesting it is refused
+    as ``grounding_unattested``, which is checked only on a backup
+    carrying the format stamp, since files written before the
+    attestations existed carry none. Both take the same override.
     """
     from mareforma.db import restore as _restore
     return _restore(
@@ -513,6 +486,7 @@ def restore(
         claims_toml=claims_toml,
         rekor_log_pubkey_pem=rekor_log_pubkey_pem,
         enforce_rekor_policy=enforce_rekor_policy,
+        trust_unaccounted_backup=trust_unaccounted_backup,
     )
 
 
@@ -724,43 +698,13 @@ __all__ = [
 ]
 
 
-# Retired public support-level labels. REPLICATED and ESTABLISHED were the
-# public names for the top of the support ladder; the trust map now leads with
-# the effective-independence number, not a single support word, so these labels
-# are retired from the public surface. They keep working for one release as
-# string aliases and emit a DeprecationWarning when read via the public module;
-# v0.4.0 removes them.
-#
-# The labels go first, the ladder goes with them. v0.4.0 drops the stored
-# ``support_level`` column, the promotion machinery, and the
-# ``query(min_support=...)`` filter, which is why that filter warns too
-# (``_graph._warn_min_support``): the string path is the one real callers take,
-# and a removal that only announced itself through a module attribute would
-# reach nobody. Internal callers use the string literals directly, never this
-# module attribute, so the suite does not warn on itself here.
-_DEPRECATED_SUPPORT_LABELS = ("REPLICATED", "ESTABLISHED")
-
-
 def __getattr__(name: str) -> str:
-    """PEP 562 hook: resolve a retired public label with a deprecation warning.
+    """PEP 562 hook: every missing attribute is an error.
 
-    Only the two retired support-level labels are resolved here; every other
-    missing attribute stays an ``AttributeError`` so a typo on the public
-    surface is not silently swallowed.
+    The two retired support-level labels resolved here for one release, with a
+    deprecation notice, and they are gone. Nothing is resolved now, so a typo
+    on the public surface is not silently swallowed.
     """
-    if name in _DEPRECATED_SUPPORT_LABELS:
-        from mareforma._deprecation import _emit
-
-        _emit(
-            f"The public support-level label `mareforma.{name}` is deprecated; "
-            "the trust map now leads with the effective-independence number, "
-            "not a support word. v0.4.0 removes the whole support ladder, not "
-            "just this alias: the stored support_level column, the promotion "
-            "machinery, and the query(min_support=...) filter go with it. Read "
-            "the independence axis of the trust map instead.",
-            3,  # +1 for _emit's own frame
-        )
-        return name
     raise AttributeError(f"module 'mareforma' has no attribute {name!r}")
 
 
@@ -770,8 +714,7 @@ def __dir__() -> list[str]:
     ``Path`` and ``TYPE_CHECKING`` are imported at module scope because
     ``open()`` uses them at runtime, but they should not surface in
     tab-completion or be confused for public mareforma surface. The retired
-    support labels are intentionally omitted: they resolve via
-    :func:`__getattr__` but stay out of tab-completion, matching their
-    deprecated status.
+    support labels are gone from the module entirely: :func:`__getattr__`
+    resolves nothing, so there is no name here to omit.
     """
     return sorted(__all__)

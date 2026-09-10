@@ -75,7 +75,7 @@ class TestSidecarRoundTrip:
             cache_path.unlink()
 
         # Restore
-        result = mareforma.restore(tmp_path)
+        result = mareforma.restore(tmp_path, trust_unaccounted_backup=True)
         assert result["claims_restored"] == 1
 
         # Verify sidecar row was replayed
@@ -137,7 +137,7 @@ class TestDriftWarnings:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            mareforma.restore(tmp_path)
+            mareforma.restore(tmp_path, trust_unaccounted_backup=True)
             section_warns = [x for x in w if issubclass(x.category, RekorSidecarSectionAbsentWarning)]
             assert len(section_warns) == 1
             assert "no [rekor_inclusions] section" in str(section_warns[0].message)
@@ -192,7 +192,7 @@ class TestDriftWarnings:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            mareforma.restore(tmp_path)
+            mareforma.restore(tmp_path, trust_unaccounted_backup=True)
             entry_warns = [x for x in w if issubclass(x.category, RekorSidecarEntryMissingWarning)]
             assert len(entry_warns) == 1
             assert "no matching entry" in str(entry_warns[0].message)
@@ -238,7 +238,7 @@ class TestAdversarial:
             cache_path.unlink()
 
         with pytest.raises(RestoreError, match="not in the .claims. section"):
-            mareforma.restore(tmp_path)
+            mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     def test_missing_required_fields_raises(self, tmp_path):
         """A sidecar entry missing uuid or raw_response_b64 raises RestoreError."""
@@ -270,7 +270,7 @@ class TestAdversarial:
             cache_path.unlink()
 
         with pytest.raises(RestoreError, match="missing required fields"):
-            mareforma.restore(tmp_path)
+            mareforma.restore(tmp_path, trust_unaccounted_backup=True)
 
     def test_empty_rekor_inclusions_section_succeeds(self, tmp_path):
         """An empty [rekor_inclusions] section is valid (no logged claims)."""
@@ -299,5 +299,5 @@ class TestAdversarial:
         if cache_path.exists():
             cache_path.unlink()
 
-        result = mareforma.restore(tmp_path)
+        result = mareforma.restore(tmp_path, trust_unaccounted_backup=True)
         assert result["claims_restored"] == 1

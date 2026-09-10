@@ -7,10 +7,10 @@ dataset, and the graph answers three replication questions automatically.
 
 Trust reads off the derived axes `graph.proposition_status(prop)` returns:
 `status` per `content_id` (the answer) and `question_status` per `frame_id` (the
-question). The `REPLICATED` convergence this example turns on lives on the stored
-`support_level` ladder, the legacy per-claim axis deprecated for v0.4.0; read the
-derived independence axis, not the stored label, to tell a real convergence from
-a spurious one.
+question). Nothing on a claim ranks it, so the convergence this example turns on
+is read off the record rather than stored on it: who signed each claim, and what
+each cites. Read the derived independence axis to tell a real convergence from a
+spurious one, because the two look identical in shape.
 
 Each step below is the code from
 [`04_private_data_public_findings.py`](04_private_data_public_findings.py)
@@ -25,11 +25,11 @@ No API key required.
 
 ## Setup: distinct keys per lab, plus a provenance-trace tool
 
-Distinct signing keys are the legacy independence signal, used when no model
-lineage is observed; effective independence counts distinct model and method. Two
-claims that share an ESTABLISHED upstream, signed by **distinct keys**, reach the
-REPLICATED support level. `generated_by` is a display label, not what drives it.
-Each lab signs with its own key, passed per-call via `signer=`.
+Distinct signing keys are the weakest independence signal, used when no model
+lineage is observed; effective independence counts distinct model and method.
+Two claims citing a shared upstream under **distinct keys** are what convergence
+looks like on the record. `generated_by` is a display label and carries no
+weight. Each lab signs with its own key, passed per-call via `signer=`.
 
 ```python
 # get_tools() gives the read tool; the write tool binds the graph's default key,
@@ -39,19 +39,19 @@ query_graph, _ = [tool(fn) for fn in graph.get_tools(generated_by="lab_a/model-a
 lab_a_priv = _signing.load_private_key(lab_a_key_path)  # Lab A's key
 lab_b_priv = _signing.load_private_key(lab_b_key_path)  # Lab B's key
 
-# Enroll Lab A as a validator so its PRELIMINARY step claims are visible on read;
-# query() hides PRELIMINARY claims signed by a non-enrolled key by default.
+# Enroll Lab A as a validator. Every claim is served whatever key signed it, so
+# this is what lets a reader tell a vouched-for signer from an unknown one.
 graph.enroll_validator(
     _signing.public_key_to_pem(lab_a_priv.public_key()), identity="lab_a")
 
 @tool
 def get_provenance_trace(claim_id: str) -> dict:
-    """Return a claim's full lineage, sources, upstream, classification,
-    support level. This is what Lab B reads: the trace, not the raw data."""
+    """Return a claim's full lineage: sources, upstream, classification.
+    This is what Lab B reads: the trace, not the raw data."""
     claim = graph.get_claim(claim_id)
     return {} if claim is None else {
         "claim_id": claim["claim_id"], "text": claim["text"],
-        "classification": claim["classification"], "support_level": claim["support_level"],
+        "classification": claim["classification"],
         "source_name": claim.get("source_name"), "generated_by": claim.get("generated_by"),
         "supports": json.loads(claim.get("supports_json", "[]") or "[]"),
         "contradicts": json.loads(claim.get("contradicts_json", "[]") or "[]"),
@@ -61,13 +61,13 @@ def get_provenance_trace(claim_id: str) -> dict:
 ## Lab A: discovery and trace publication
 
 ```python
-# An ESTABLISHED upstream both labs cite (seed=True). Lab A then runs a
+# The shared upstream both labs cite. Lab A then runs a
 # multi-step analysis on its private dataset; each step is a claim with
 # provenance, signed by Lab A's key. The raw data never leaves Lab A, only
 # source NAMES travel.
 upstream_ref = graph.assert_claim(
     "Prior literature on Target T in condition C",
-    classification="DERIVED", generated_by="agent_seed/literature", seed=True)
+    classification="DERIVED", generated_by="agent_seed/literature")
 
 step_1 = graph.assert_claim(
     "Candidate target T shows elevated activity in condition C"
@@ -97,7 +97,7 @@ step_2 = graph.assert_claim(
 # Lab B reads Lab A's trace from the shared graph, the experimental logic,
 # not the data, then runs the same hypothesis on its own private dataset.
 lab_a_findings = json.loads(query_graph.invoke(
-    {"topic": "Target T", "min_support": "PRELIMINARY"}))
+    {"topic": "Target T"}))
 for f in lab_a_findings:
     trace = get_provenance_trace.invoke({"claim_id": f["claim_id"]})
     # trace['source_name'] names Lab A's data, which Lab B cannot access.
@@ -118,11 +118,6 @@ rep_2 = graph.assert_claim(
 ```
   query_graph('Target T') → 3 claims from Lab A
 
-  Claim:      Prior literature on Target T in condition C…
-  Source:     None  ← Lab B cannot access this
-  Supports:   []
-  Class:      DERIVED
-
   Claim:      Target T activity in condition C is specific to cell subtype…
   Source:     private_dataset_A  ← Lab B cannot access this
   Supports:   ['f752301b…']
@@ -133,6 +128,11 @@ rep_2 = graph.assert_claim(
   Supports:   ['e7b323e1…']
   Class:      ANALYTICAL
 
+  Claim:      Prior literature on Target T in condition C…
+  Source:     None  ← Lab B cannot access this
+  Supports:   []
+  Class:      DERIVED
+
   Lab B published 2 claims.
   rep_1 id: 088283cf…
   rep_2 id: 6ce98680…
@@ -141,7 +141,7 @@ rep_2 = graph.assert_claim(
 ## Q1: Independent data paths?
 
 ```python
-# The claims with a dataset behind them; the ESTABLISHED seed is the shared
+# The claims with a dataset behind them; the literature seed is the shared
 # upstream, not one of the paths being compared.
 paths = [c for c in graph.query("Target T") if c.get("source_name")]
 sources = {c["source_name"] for c in paths}
@@ -166,21 +166,30 @@ point: the label is free text, the signature is not.
 
 ```python
 for c in graph.query("Target T"):
-    print(c["text"][:45], c["support_level"])
-# Distinct signing keys + shared ESTABLISHED upstream + independent data → REPLICATED.
+    print(c["text"][:45], c["classification"])
+
+# The convergent pair is Lab A's first step against Lab B's independent one:
+# both cite the shared literature anchor, each on its own dataset, under its own
+# key. rep_2 is deliberately NOT the comparison, because it descends through Lab
+# A's chain rather than reaching the anchor on its own. Q3 below traces that.
+c_step1, c_rep1 = graph.get_claim(step_1), graph.get_claim(rep_1)
+distinct_signers = c_step1["asserter_keyid"] != c_rep1["asserter_keyid"]
+shared_upstream = (set(json.loads(c_step1["supports_json"] or "[]"))
+                   & set(json.loads(c_rep1["supports_json"] or "[]")))
 ```
 
 ```
-  Prior literature on Target T in condition C… ESTABLISHED
-  Candidate target T shows elevated activity in… REPLICATED
-  Candidate target T shows elevated activity in… REPLICATED
-  Target T activity in condition C is specific … PRELIMINARY
+  Target T activity in condition C is specific … ANALYTICAL
+  Candidate target T shows elevated activity in… ANALYTICAL
+  Target T activity in condition C is specific … ANALYTICAL
+  Candidate target T shows elevated activity in… ANALYTICAL
+  Prior literature on Target T in condition C… DERIVED
 
-  ✓ REPLICATED: distinct signing keys, shared upstream, independent data paths.
-    The labs replicated across datasets. REPLICATED is a support label,
-    though: read effective independence to know a distinct model checked
-    the finding, not two runs of one. The spurious contrast below shows
-    REPLICATED firing on nothing.
+  ✓ Distinct signing keys on a shared upstream, across two datasets.
+    That is convergence on the record, and it is not a claim about
+    models: read effective independence to know a distinct model
+    checked the finding rather than two runs of one. The spurious
+    contrast below has the same shape and nothing behind it.
 ```
 
 ## Q3: Provenance distance, and the spurious-replication trap
@@ -222,21 +231,21 @@ spurious_a = graph.assert_claim(
 spurious_b = graph.assert_claim(
     "Target T is likely relevant in condition C based on literature",
     classification="INFERRED", supports=[upstream_ref],
-    generated_by="lab_b/model-b", signer=lab_b_priv)   # distinct key + same upstream → REPLICATED
+    generated_by="lab_b/model-b", signer=lab_b_priv)   # distinct key, same upstream
 ```
 
 ```
-  spurious_a support_level       REPLICATED
-  spurious_b support_level       REPLICATED
+  spurious_a validated           False
+  spurious_b validated           False
   spurious_a classification      INFERRED
 
-  REPLICATED fired, but classification=INFERRED and source_name=''.
+  The convergence shape is intact, and classification=INFERRED with source_name=''.
   Two distinct keys repeated the same LLM prior. No data behind either finding.
 ```
 
-`REPLICATED` alone is not trust. The graph lets you filter it out:
-`query('Target T', min_support='REPLICATED')`, then keep only
-`classification='ANALYTICAL'` with a non-empty `source_name`.
+The shape alone is not trust. The graph lets you filter it out: `query('Target
+T')`, then keep only `classification='ANALYTICAL'` with a non-empty
+`source_name`.
 
 ## Using a real LLM
 

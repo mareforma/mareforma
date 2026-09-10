@@ -191,6 +191,14 @@ def observe(cites=None, *, content_address: bool = False):
     ------
     ObserveHandle
         Whose ``.verdict`` holds the :class:`GroundingVerdict` after the block.
+
+    Notes
+    -----
+    The observed code shares this interpreter, which is what makes its reads
+    visible at all. So a verdict grades a pipeline that does not attack its
+    observer: code written to defeat the observation could fabricate what is
+    recorded here. The verdict attests what this process saw, not the honesty
+    of the code it watched.
     """
     _audit.ensure_installed()
     _loaders.ensure_installed()

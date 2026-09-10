@@ -3,11 +3,11 @@
 Covers:
   - SQLite triggers reject illegal state transitions with translated
     `IllegalStateTransitionError`
-  - CHECK constraint enforces validation_signature on ESTABLISHED rows
+  - CHECK constraint refuses a row naming a validator with no envelope
   - ``prev_hash`` chain is built linearly across claims
   - ``prev_hash`` UNIQUE catches branched chains
   - Status-only edits on signed claims still work (status transition
-    legal without support_level change)
+    legal on a signed row)
 """
 
 from __future__ import annotations
@@ -111,141 +111,19 @@ def _any_column(conn, table: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-class TestInsertTrigger:
-    def test_preliminary_insert_allowed(self, tmp_path: Path) -> None:
-        # The standard add_claim path, sanity check the trigger doesn't
-        # reject the legal case.
-        conn = open_db(tmp_path)
-        try:
-            cid = add_claim(conn, tmp_path, "ok", generated_by="agent")
-            row = conn.execute(
-                "SELECT support_level FROM claims WHERE claim_id = ?", (cid,)
-            ).fetchone()
-            assert row["support_level"] == "PRELIMINARY"
-        finally:
-            conn.close()
+class TestStatusEditsOnSignedRows:
+    """What survives the state machine the ladder used to drive.
 
-    def test_direct_established_without_validation_rejected(
-        self, tmp_path: Path,
-    ) -> None:
-        conn = open_db(tmp_path)
-        try:
-            with pytest.raises(sqlite3.IntegrityError, match="established_without_validation"):
-                conn.execute(
-                    """
-                    INSERT INTO claims
-                        (claim_id, text, classification, support_level,
-                         status, generated_by, supports_json, contradicts_json,
-                         created_at, updated_at)
-                    VALUES (?, ?, 'INFERRED', 'ESTABLISHED', 'open', 'agent',
-                            '[]', '[]', ?, ?)
-                    """,
-                    (str(uuid.uuid4()), "rogue ESTABLISHED", _now_iso(), _now_iso()),
-                )
-        finally:
-            conn.close()
-
-    def test_preliminary_with_validation_rejected(self, tmp_path: Path) -> None:
-        """A PRELIMINARY row that carries validated_by is incoherent, reject."""
-        conn = open_db(tmp_path)
-        try:
-            with pytest.raises(sqlite3.IntegrityError, match="preliminary_with_validation"):
-                conn.execute(
-                    """
-                    INSERT INTO claims
-                        (claim_id, text, classification, support_level,
-                         status, generated_by, validated_by, supports_json,
-                         contradicts_json, created_at, updated_at)
-                    VALUES (?, ?, 'INFERRED', 'PRELIMINARY', 'open', 'agent',
-                            'someone@lab', '[]', '[]', ?, ?)
-                    """,
-                    (str(uuid.uuid4()), "weird", _now_iso(), _now_iso()),
-                )
-        finally:
-            conn.close()
-
-
-# ---------------------------------------------------------------------------
-# UPDATE trigger, transitions
-# ---------------------------------------------------------------------------
-
-
-class TestUpdateTrigger:
-    def test_preliminary_to_replicated_allowed(self, tmp_path: Path) -> None:
-        # The auto-promotion path that _maybe_update_replicated takes.
-        from mareforma import signing as _sig
-        from tests._helpers import _two_signers
-        key = tmp_path / "k"
-        _sig.bootstrap_key(key)
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=key) as g:
-            upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
-            a = g.assert_claim("a", supports=[upstream], generated_by="A", signer=sa)
-            b = g.assert_claim("b", supports=[upstream], generated_by="B", signer=sb)
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_preliminary_directly_to_established_rejected(
-        self, tmp_path: Path,
-    ) -> None:
-        """Raw UPDATE attempting PRELIMINARY → ESTABLISHED hits the trigger.
-
-        ``validate_claim`` has a Python-layer guard that blocks this
-        path with a ValueError before reaching the DB. We bypass it
-        here to exercise the trigger directly, which is the actual
-        defense-in-depth layer the DB trigger provides."""
-        conn = open_db(tmp_path)
-        try:
-            cid = add_claim(conn, tmp_path, "x", generated_by="agent")
-            with pytest.raises(sqlite3.IntegrityError, match="illegal_transition:from_preliminary"):
-                conn.execute(
-                    "UPDATE claims SET support_level = 'ESTABLISHED', "
-                    "validation_signature = ? WHERE claim_id = ?",
-                    ('{"sig":"x"}', cid),
-                )
-        finally:
-            conn.close()
-
-    def test_established_downgrade_rejected(self, tmp_path: Path) -> None:
-        from mareforma import signing as _sig
-        from tests._helpers import _two_signers
-        gen_key = tmp_path / "gen.key"
-        val_key = tmp_path / "val.key"
-        if not gen_key.exists():
-            _sig.bootstrap_key(gen_key)
-        if not val_key.exists():
-            _sig.bootstrap_key(val_key)
-        val_pem = _sig.public_key_to_pem(
-            _sig.load_private_key(val_key).public_key(),
-        )
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=gen_key) as g:
-            upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
-            id_a = g.assert_claim("a", supports=[upstream], generated_by="A", signer=sa)
-            g.assert_claim("b", supports=[upstream], generated_by="B", signer=sb)
-            g.enroll_validator(val_pem, identity="v")
-        with mareforma.open(tmp_path, key_path=val_key) as g:
-            g.validate(id_a)
-            # Now id_a is ESTABLISHED. Attempt a direct UPDATE to PRELIMINARY.
-            conn = g._conn
-            with pytest.raises(IllegalStateTransitionError, match="from_established"):
-                try:
-                    conn.execute(
-                        "UPDATE claims SET support_level = 'PRELIMINARY' "
-                        "WHERE claim_id = ?",
-                        (id_a,),
-                    )
-                except sqlite3.IntegrityError as exc:
-                    translated = _db._state_error_from_integrity(exc)
-                    if translated is not None:
-                        raise translated from exc
-                    raise
+    The insert and update triggers checked one thing each: that a level was
+    a legal one to be born at, and that a change from one to another was a
+    step the machine allowed. There are no levels, so both went. Editing a
+    signed row's status was never about levels and still holds.
+    """
 
     def test_status_only_edit_on_signed_claim_allowed(
         self, tmp_path: Path,
     ) -> None:
-        """The trigger fires on UPDATE OF support_level. A status-only edit
-        does NOT change support_level and must therefore pass even on a
+        """A status-only edit must pass even on a
         signed (and otherwise immutable) claim."""
         from mareforma import signing as _sig
         if not (tmp_path / "k").exists():
@@ -254,7 +132,6 @@ class TestUpdateTrigger:
             cid = g.assert_claim("retract me", generated_by="agent")
             update_claim(g._conn, tmp_path, cid, status="retracted")
             assert g.get_claim(cid)["status"] == "retracted"
-            assert g.get_claim(cid)["support_level"] == "PRELIMINARY"
 
 
 # ---------------------------------------------------------------------------
@@ -262,37 +139,85 @@ class TestUpdateTrigger:
 # ---------------------------------------------------------------------------
 
 
-class TestCheckConstraint:
-    def test_check_blocks_established_with_null_validation_signature(
-        self, tmp_path: Path,
-    ) -> None:
-        """The CHECK is the row-level belt to the trigger's transition-level
-        suspenders. A direct UPDATE that tries to NULL validation_signature
-        on an ESTABLISHED row violates CHECK."""
+class TestAValidationNobodySigned:
+    """The CHECK that outlived the ladder, from the other side.
+
+    It used to say a promoted row must carry a validation envelope, which
+    was a claim about a level. The claim underneath had nothing to do with
+    levels: a row cannot say a human validated it without the envelope that
+    proves one did. ``validated_by`` and ``validated_at`` are display fields
+    denormalised out of the signed payload, so either of them standing alone is
+    a row asserting a validation nobody signed.
+    """
+
+    def _validated_claim(self, tmp_path: Path) -> tuple[Path, str]:
         from mareforma import signing as _sig
+
         gen_key = tmp_path / "gen.key"
         val_key = tmp_path / "val.key"
-        if not gen_key.exists():
-            _sig.bootstrap_key(gen_key)
-        if not val_key.exists():
-            _sig.bootstrap_key(val_key)
+        _sig.bootstrap_key(gen_key)
+        _sig.bootstrap_key(val_key)
         val_pem = _sig.public_key_to_pem(
             _sig.load_private_key(val_key).public_key(),
         )
-        from tests._helpers import _two_signers
-        sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=gen_key) as g:
-            upstream = g.assert_claim("upstream", generated_by="seed", seed=True)
-            id_a = g.assert_claim("a", supports=[upstream], generated_by="A", signer=sa)
-            g.assert_claim("b", supports=[upstream], generated_by="B", signer=sb)
+            claim_id = g.assert_claim("a finding", generated_by="A")
             g.enroll_validator(val_pem, identity="v")
         with mareforma.open(tmp_path, key_path=val_key) as g:
-            g.validate(id_a)
+            g.validate(claim_id)
+        return val_key, claim_id
+
+    def test_the_envelope_cannot_be_cleared_off_a_validated_row(
+        self, tmp_path: Path,
+    ) -> None:
+        val_key, claim_id = self._validated_claim(tmp_path)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            with pytest.raises(
+                sqlite3.IntegrityError, match="validation_is_terminal",
+            ):
+                g._conn.execute(
+                    "UPDATE claims SET validation_signature = NULL "
+                    "WHERE claim_id = ?",
+                    (claim_id,),
+                )
+
+    def test_the_check_still_refuses_it_with_the_trigger_gone(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two layers, and the test above only reaches the outer one.
+
+        A trigger is droppable by anyone who can write to the file, which is
+        the same person this guard is about, so a test that stops at the
+        trigger has not shown the row is safe. The CHECK is not droppable
+        without rebuilding the table.
+        """
+        val_key, claim_id = self._validated_claim(tmp_path)
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g._conn.execute("DROP TRIGGER claims_validation_is_terminal")
             with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
                 g._conn.execute(
                     "UPDATE claims SET validation_signature = NULL "
                     "WHERE claim_id = ?",
-                    (id_a,),
+                    (claim_id,),
+                )
+
+    @pytest.mark.parametrize("column", ["validated_by", "validated_at"])
+    def test_a_display_field_cannot_stand_without_the_envelope(
+        self, tmp_path: Path, column: str,
+    ) -> None:
+        """The direction the ladder's version never covered.
+
+        The old CHECK asked whether a promoted row had an envelope. It never
+        asked the reverse, because a row could not carry a validator's name
+        without having been promoted to carry it. Nothing enforces that now
+        except this.
+        """
+        with mareforma.open(tmp_path) as g:
+            claim_id = g.assert_claim("a finding", generated_by="A")
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+                g._conn.execute(
+                    f"UPDATE claims SET {column} = ? WHERE claim_id = ?",
+                    ("someone who never signed", claim_id),
                 )
 
 
@@ -366,10 +291,10 @@ class TestPrevHashChain:
                 conn.execute(
                     """
                     INSERT INTO claims
-                        (claim_id, text, classification, support_level,
+                        (claim_id, text, classification,
                          status, generated_by, supports_json, contradicts_json,
                          prev_hash, created_at, updated_at)
-                    VALUES (?, ?, 'INFERRED', 'PRELIMINARY', 'open', 'agent',
+                    VALUES (?, ?, 'INFERRED', 'open', 'agent',
                             '[]', '[]', ?, ?, ?)
                     """,
                     (
@@ -391,22 +316,20 @@ class TestPrevHashChain:
 
 class TestStatusOnlyEditsBypassTrigger:
     def test_retraction_of_replicated_claim(self, tmp_path: Path) -> None:
-        """A REPLICATED claim's status can be set to retracted without
-        the state-machine trigger firing (it fires on OF support_level)."""
+        """A converged claim's status can be set to retracted without
+        a state-machine trigger firing."""
         from mareforma import signing as _sig
         from tests._helpers import _two_signers
         key = tmp_path / "k"
         _sig.bootstrap_key(key)
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
-            up = g.assert_claim("up", generated_by="seed", seed=True)
+            up = g.assert_claim("up", generated_by="seed")
             a = g.assert_claim("a", supports=[up], generated_by="A", signer=sa)
             g.assert_claim("b", supports=[up], generated_by="B", signer=sb)
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
             update_claim(g._conn, tmp_path, a, status="retracted")
             row = g.get_claim(a)
             assert row["status"] == "retracted"
-            assert row["support_level"] == "REPLICATED"
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +411,7 @@ class TestSignedFieldsAppendOnly:
             g.close()
 
     def test_asserter_keyid_update_blocked(self, tmp_path: Path) -> None:
-        """asserter_keyid is the independence axis of REPLICATED. It is a
+        """asserter_keyid is the independence axis. It is a
         denormalisation of the bundle's signer, so the row may not contradict
         the envelope it was derived from."""
         cid, g = self._signed_claim(tmp_path)
@@ -619,172 +542,11 @@ class TestSignedFieldsAppendOnly:
 # ---------------------------------------------------------------------------
 
 
-class TestSignedPromotionBacked:
-    """claims_signed_promotion_backed refuses a raw promotion of a signed row.
-
-    ``support_level`` is the trust ladder and it is not a signed field, so
-    without this trigger one ``UPDATE claims SET support_level='REPLICATED'``
-    lifts a lone claim a rung. The transition is legal to the state machine, so
-    the guard is the promotion marker: only the library's promotion paths open
-    it, and a statement from anywhere else is refused.
-    """
-
-    def _signed_claim(self, tmp_path: Path) -> tuple[str, "object"]:
-        from mareforma import signing as _sig
-        key_path = tmp_path / "key"
-        _sig.bootstrap_key(key_path)
-        g = mareforma.open(tmp_path, key_path=key_path)
-        return g.assert_claim("signed anchor"), g
-
-    def test_direct_promotion_of_signed_row_refused(self, tmp_path: Path) -> None:
-        cid, g = self._signed_claim(tmp_path)
-        try:
-            with pytest.raises(sqlite3.IntegrityError, match="promotion_unmarked"):
-                g._conn.execute(
-                    "UPDATE claims SET support_level = 'REPLICATED' "
-                    "WHERE claim_id = ?",
-                    (cid,),
-                )
-            assert g.get_claim(cid)["support_level"] == "PRELIMINARY"
-        finally:
-            g.close()
-
-    def test_direct_promotion_from_a_foreign_connection_refused(
-        self, tmp_path: Path,
-    ) -> None:
-        """A co-resident process opens graph.db with plain sqlite3. It never
-        opens the marker, so the promotion is refused by the trigger's own
-        message rather than by a name the connection cannot resolve."""
-        cid, g = self._signed_claim(tmp_path)
-        g.close()
-        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
-        try:
-            with pytest.raises(sqlite3.IntegrityError, match="promotion_unmarked"):
-                observer.execute(
-                    "UPDATE claims SET support_level = 'REPLICATED' "
-                    "WHERE claim_id = ?",
-                    (cid,),
-                )
-        finally:
-            observer.close()
-        with open_db(tmp_path) as conn:
-            row = conn.execute(
-                "SELECT support_level FROM claims WHERE claim_id = ?", (cid,),
-            ).fetchone()
-            assert row["support_level"] == "PRELIMINARY"
-
-    def test_managed_triggers_compile_on_an_unregistered_connection(
-        self, tmp_path: Path,
-    ) -> None:
-        """Trigger text is durable schema, so every connection that opens the
-        file has to be able to compile it, including an older release of
-        mareforma and any co-resident reader. A name only this release puts on
-        its connections (a per-connection SQL function) breaks that: SQLite
-        resolves it when it compiles the statement, so the whole watched column
-        becomes unwritable rather than the guarded transition being refused.
-
-        ``WHERE 0`` matches no row, so nothing here depends on the trigger
-        firing; the statement still has to compile with the trigger's
-        subprogram attached.
-        """
-        self._signed_claim(tmp_path)[1].close()
-        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
-        try:
-            for _, sql in _MANAGED_TRIGGERS:
-                for statement in _noop_dml_for_trigger(observer, sql):
-                    observer.execute(statement)
-        finally:
-            observer.close()
-
-    def test_non_promoting_level_write_from_a_foreign_connection_passes(
-        self, tmp_path: Path,
-    ) -> None:
-        """The guard covers two transitions, not the column. A write that
-        leaves the level where it is has no rung to steal and must go
-        through, whoever holds the connection."""
-        cid, g = self._signed_claim(tmp_path)
-        g.close()
-        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
-        try:
-            observer.execute(
-                "UPDATE claims SET support_level = 'PRELIMINARY' "
-                "WHERE claim_id = ?",
-                (cid,),
-            )
-            observer.commit()
-        finally:
-            observer.close()
-
-    def test_an_open_window_does_not_reach_another_connection(
-        self, tmp_path: Path,
-    ) -> None:
-        """The marker is what stands between a stray UPDATE and the trust
-        ladder, so it has to be state one connection cannot read off another.
-        A marker kept in the graph itself would hand every co-resident writer
-        the window this one opened."""
-        from mareforma.db import _promotion_window
-        cid, g = self._signed_claim(tmp_path)
-        observer = sqlite3.connect(str(tmp_path / ".mareforma" / "graph.db"))
-        try:
-            with _promotion_window(g._conn):
-                with pytest.raises(
-                    sqlite3.IntegrityError, match="promotion_unmarked",
-                ):
-                    observer.execute(
-                        "UPDATE claims SET support_level = 'REPLICATED' "
-                        "WHERE claim_id = ?",
-                        (cid,),
-                    )
-        finally:
-            observer.close()
-            g.close()
-
-    def test_the_window_closes_when_the_block_raises(
-        self, tmp_path: Path,
-    ) -> None:
-        """A window left open by a failed promotion would leave the connection
-        promoting freely for the rest of its life."""
-        from mareforma.db import _promotion_window
-        cid, g = self._signed_claim(tmp_path)
-        try:
-            with pytest.raises(RuntimeError):
-                with _promotion_window(g._conn):
-                    raise RuntimeError("promotion path blew up")
-            with pytest.raises(sqlite3.IntegrityError, match="promotion_unmarked"):
-                g._conn.execute(
-                    "UPDATE claims SET support_level = 'REPLICATED' "
-                    "WHERE claim_id = ?",
-                    (cid,),
-                )
-        finally:
-            g.close()
-
-    def test_unsigned_row_promotion_passes(self, tmp_path: Path) -> None:
-        """The trigger gates on OLD.signature_bundle IS NOT NULL, like the
-        laundering guard: an unsigned row carries no commitment to defend."""
-        conn = open_db(tmp_path)
-        try:
-            cid = add_claim(conn, tmp_path, "draft", generated_by="agent")
-            conn.execute(
-                "UPDATE claims SET support_level = 'REPLICATED' "
-                "WHERE claim_id = ?",
-                (cid,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Append-only, signed rows refuse DELETE
-# ---------------------------------------------------------------------------
-
-
 class TestSignedDeleteAppendOnly:
     """claims_signed_no_delete refuses DELETE on a signed claim.
 
     Without this trigger, a process with DB access could wipe a Rekor-
-    logged ESTABLISHED claim, _backup_claims_toml would rewrite the
+    logged and validated claim, _backup_claims_toml would rewrite the
     TOML as if the claim never existed, and the entire "append-only
     over the signed predicate" framing would be half-implemented
     (UPDATE-of-signed-fields was already locked; DELETE was not).

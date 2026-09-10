@@ -71,7 +71,7 @@ class TestStatementShape:
     def test_statement_has_intoto_type(self, tmp_path: Path) -> None:
         key_path, _ = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("c1", generated_by="seed", seed=True)
+            g.assert_claim("c1", generated_by="seed")
         statement = build_statement(tmp_path)
         assert statement["_type"] == STATEMENT_TYPE
         assert statement["_type"] == "https://in-toto.io/Statement/v1"
@@ -82,7 +82,7 @@ class TestStatementShape:
         docs, not URL fetch."""
         key_path, _ = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("c1", generated_by="seed", seed=True)
+            g.assert_claim("c1", generated_by="seed")
         statement = build_statement(tmp_path)
         assert statement["predicateType"] == PREDICATE_TYPE
         assert statement["predicateType"] == "urn:mareforma:predicate:epistemic-graph:v1"
@@ -91,7 +91,7 @@ class TestStatementShape:
     def test_subject_names_use_urn_prefix(self, tmp_path: Path) -> None:
         key_path, _ = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            cid = g.assert_claim("c1", generated_by="seed", seed=True)
+            cid = g.assert_claim("c1", generated_by="seed")
         statement = build_statement(tmp_path)
         assert len(statement["subject"]) == 1
         assert statement["subject"][0]["name"] == f"{SUBJECT_PREFIX}{cid}"
@@ -109,7 +109,7 @@ class TestStatementShape:
         key_path, _ = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
             for i in range(5):
-                g.assert_claim(f"claim {i}", generated_by="seed", seed=True)
+                g.assert_claim(f"claim {i}", generated_by="seed")
 
         original = _db_core._row_verified_on_read
         verified: list[str] = []
@@ -135,14 +135,14 @@ class TestDSSEEnvelope:
     def test_bundle_payload_type_intoto(self, tmp_path: Path) -> None:
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("c1", generated_by="seed", seed=True)
+            g.assert_claim("c1", generated_by="seed")
         bundle = sign_bundle(build_statement(tmp_path), pk)
         assert bundle["payloadType"] == BUNDLE_PAYLOAD_TYPE
 
     def test_bundle_keyid_matches(self, tmp_path: Path) -> None:
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("c1", generated_by="seed", seed=True)
+            g.assert_claim("c1", generated_by="seed")
         bundle = sign_bundle(build_statement(tmp_path), pk)
         expected_keyid = _signing.public_key_id(pk.public_key())
         assert bundle["signatures"][0]["keyid"] == expected_keyid
@@ -157,7 +157,7 @@ class TestRoundTripVerification:
     def test_untampered_bundle_verifies(self, tmp_path: Path) -> None:
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            seed = g.assert_claim("genesis", generated_by="seed", seed=True)
+            seed = g.assert_claim("genesis", generated_by="seed")
             g.assert_claim("a", supports=[seed], generated_by="A")
             g.assert_claim("b", supports=[seed], generated_by="B")
         bundle_path = tmp_path / "bundle.json"
@@ -187,7 +187,7 @@ class TestTamperDetection:
     def test_tampered_signature_fails(self, tmp_path: Path) -> None:
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("c1", generated_by="seed", seed=True)
+            g.assert_claim("c1", generated_by="seed")
         bundle_path = tmp_path / "bundle.json"
         write_bundle(tmp_path, bundle_path, pk)
         # Corrupt the signature.
@@ -207,7 +207,7 @@ class TestTamperDetection:
         tampered text."""
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("genesis", generated_by="seed", seed=True)
+            g.assert_claim("genesis", generated_by="seed")
         bundle_path = tmp_path / "bundle.json"
         write_bundle(tmp_path, bundle_path, pk)
 
@@ -237,7 +237,7 @@ class TestTamperDetection:
         """
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            headline = g.assert_claim("headline", generated_by="seed", seed=True)
+            headline = g.assert_claim("headline", generated_by="seed")
             awkward = g.assert_claim(
                 "awkward result", generated_by="lab", contradicts=[headline],
             )
@@ -267,7 +267,7 @@ class TestTamperDetection:
         """Future v2 predicate type → v1 verifier refuses."""
         key_path, pk = _bootstrap(tmp_path)
         with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("c1", generated_by="seed", seed=True)
+            g.assert_claim("c1", generated_by="seed")
         bundle_path = tmp_path / "bundle.json"
         write_bundle(tmp_path, bundle_path, pk)
 
@@ -299,7 +299,7 @@ class TestCLI:
             # First assert a claim so the bundle has subjects.
             import mareforma
             with mareforma.open() as g:
-                g.assert_claim("seeded", generated_by="seed", seed=True)
+                g.assert_claim("seeded", generated_by="seed")
             result = runner.invoke(cli, ["export", "--bundle"],
                                    catch_exceptions=False)
             assert result.exit_code == 0, result.output
@@ -315,7 +315,7 @@ class TestCLI:
             self._ensure_xdg(tmp_path)
             import mareforma
             with mareforma.open() as g:
-                g.assert_claim("seeded", generated_by="seed", seed=True)
+                g.assert_claim("seeded", generated_by="seed")
             result = runner.invoke(cli, ["export", "--bundle", "--json"])
             assert result.exit_code == 1, result.output
             assert "mutually exclusive" in result.output
@@ -327,7 +327,7 @@ class TestCLI:
             self._ensure_xdg(tmp_path)
             import mareforma
             with mareforma.open() as g:
-                g.assert_claim("seeded", generated_by="seed", seed=True)
+                g.assert_claim("seeded", generated_by="seed")
             runner.invoke(cli, ["export", "--bundle"], catch_exceptions=False)
             result = runner.invoke(
                 cli, ["verify", "mareforma-bundle.json"],
@@ -344,7 +344,7 @@ class TestCLI:
         with runner.isolated_filesystem(temp_dir=tmp_path):
             self._ensure_xdg(tmp_path)
             with mareforma.open() as g:
-                g.assert_claim("seeded", generated_by="seed", seed=True)
+                g.assert_claim("seeded", generated_by="seed")
             runner.invoke(cli, ["export", "--bundle"], catch_exceptions=False)
             shown = runner.invoke(cli, ["key", "show", "--pem"])
             assert shown.exit_code == 0, shown.output
@@ -364,7 +364,7 @@ class TestCLI:
             self._ensure_xdg(tmp_path)
             import mareforma
             with mareforma.open() as g:
-                g.assert_claim("seeded", generated_by="seed", seed=True)
+                g.assert_claim("seeded", generated_by="seed")
             runner.invoke(cli, ["export", "--bundle"], catch_exceptions=False)
             # Corrupt the signature.
             bundle = json.loads(Path("mareforma-bundle.json").read_text())
@@ -383,7 +383,7 @@ class TestCLI:
         _signing.bootstrap_key(root_key)
         import mareforma
         with mareforma.open(".", key_path=root_key) as g:
-            g.assert_claim("seeded", generated_by="seed", seed=True)
+            g.assert_claim("seeded", generated_by="seed")
         keyid = _signing.public_key_id(
             _signing.load_private_key(root_key).public_key()
         )
@@ -633,242 +633,6 @@ class TestPerClaimSignature:
 
 # ---------------------------------------------------------------------------
 # Support-level attestation (no exporter-only inflation)
-# ---------------------------------------------------------------------------
-
-
-class TestSupportLevelAttestation:
-    def test_established_without_a_validation_signature_fails(
-        self, tmp_path: Path,
-    ) -> None:
-        """A PRELIMINARY claim relabelled ESTABLISHED by the exporter, with no
-        validator-signed promotion, must fail — the level cannot be inflated."""
-        key_path, pk = _bootstrap(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as g:
-            g.assert_claim("really preliminary", generated_by="a")
-        statement = build_statement(tmp_path)
-        for node in statement["predicate"]["@graph"]:
-            if node.get("@type") == "mare:Claim":
-                node["supportLevel"] = "ESTABLISHED"
-                node.pop("validationSignature", None)
-                break
-        bundle = sign_bundle(statement, pk)
-        bundle_path = tmp_path / "bundle.json"
-        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
-        with pytest.raises(
-            BundleVerificationError, match="carries no validation signature",
-        ):
-            verify_bundle(bundle_path, pk.public_key())
-
-    def test_replicated_without_corroboration_fails(
-        self, tmp_path: Path,
-    ) -> None:
-        """A lone claim relabelled REPLICATED, with no second distinct-signer
-        claim on a shared upstream, must fail."""
-        key_path, pk = _bootstrap(tmp_path)
-        with mareforma.open(tmp_path, key_path=key_path) as g:
-            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-            g.assert_claim("lone claim", supports=[seed], generated_by="a")
-        statement = build_statement(tmp_path)
-        for node in statement["predicate"]["@graph"]:
-            if node.get("claimText") == "lone claim":
-                node["supportLevel"] = "REPLICATED"
-                break
-        bundle = sign_bundle(statement, pk)
-        bundle_path = tmp_path / "bundle.json"
-        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
-        with pytest.raises(
-            BundleVerificationError,
-            match="neither a replication verdict that verifies",
-        ):
-            verify_bundle(bundle_path, pk.public_key())
-
-    def test_genuine_established_and_replicated_verify(
-        self, tmp_path: Path,
-    ) -> None:
-        """A real REPLICATED pair (distinct signers) promoted to ESTABLISHED by
-        a third validator round-trips: the validation envelope and distinct
-        signers are present and check out.
-
-        The promotion carries a display label, the documented happy path:
-        ``validatedBy`` is cosmetic text, not the signer's keyid, so the
-        verifier must not compare the two."""
-        root_key = tmp_path / "root.key"
-        _signing.bootstrap_key(root_key)
-        root_pk = _signing.load_private_key(root_key)
-        val_key = tmp_path / "val.key"
-        _signing.bootstrap_key(val_key)
-        val2_key = tmp_path / "val2.key"
-        _signing.bootstrap_key(val2_key)
-        val_pem = _signing.public_key_to_pem(
-            _signing.load_private_key(val_key).public_key()
-        )
-        val2_pem = _signing.public_key_to_pem(
-            _signing.load_private_key(val2_key).public_key()
-        )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("anchor", generated_by="seed", seed=True)
-            g.enroll_validator(val_pem, identity="v")
-            g.enroll_validator(val2_pem, identity="v2")
-            rep = g.assert_claim(
-                "converged", supports=[seed], generated_by="A", signer=root_pk,
-            )
-            g.assert_claim(
-                "converged", supports=[seed], generated_by="B",
-                signer=_signing.load_private_key(val_key),
-            )
-            assert g.get_claim(rep)["support_level"] == "REPLICATED"
-        with mareforma.open(tmp_path, key_path=val2_key) as g:
-            g.validate(rep, validated_by="reviewer@example.org")
-            assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
-        bundle_path = tmp_path / "bundle.json"
-        write_bundle(tmp_path, bundle_path, root_pk)
-        statement = verify_bundle(bundle_path, root_pk.public_key())
-        labels = {
-            n["claimText"]: n.get("validatedBy")
-            for n in statement["predicate"]["@graph"]
-            if n.get("@type") == "mare:Claim"
-        }
-        assert labels["converged"] == "reviewer@example.org"
-        levels = {
-            n["claimText"]: n["supportLevel"]
-            for n in statement["predicate"]["@graph"]
-            if n.get("@type") == "mare:Claim"
-        }
-        assert levels["converged"] in ("ESTABLISHED", "REPLICATED")
-
-    def test_self_validated_established_is_refused(self, tmp_path: Path) -> None:
-        """The three self-validation rules must agree: the detached bundle verifier
-        refuses a self-promoted ESTABLISHED row, the same refusal restore
-        (``_refuse_self_validation``) and the live read apply. The validator that
-        signs the promotion may not also be a signer of the claim it promotes.
-
-        This release added the refusal to restore and NOT to the bundle verifier,
-        so the verifier accepted a promotion the other paths refuse; this test
-        fails if that drift returns. A SEED envelope is separately exempt (a
-        born-ESTABLISHED claim is attested by its own asserter by design), which
-        the genuine-promotion test covers, so this pins the VALIDATION case."""
-        root_key = tmp_path / "root.key"
-        _signing.bootstrap_key(root_key)
-        root_pk = _signing.load_private_key(root_key)
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            # Asserted by the root (the loaded key), which auto-enrolls as the
-            # graph's root validator, so its keyid is chain-verified in the bundle.
-            cid = g.assert_claim("self promoted", generated_by="a")
-        # A validation envelope for the claim signed by the SAME root key that
-        # asserted it: the self-validation the live validate() refuses.
-        envelope = _signing.sign_validation(
-            {
-                "claim_id": cid,
-                "validator_keyid": _signing.public_key_id(root_pk.public_key()),
-                "validated_at": "2026-01-01T00:00:00Z",
-                "evidence_seen": [],
-            },
-            root_pk,
-        )
-        statement = build_statement(tmp_path)
-        for node in statement["predicate"]["@graph"]:
-            if node.get("claimText") == "self promoted":
-                node["supportLevel"] = "ESTABLISHED"
-                node["validationSignature"] = envelope
-                break
-        bundle = sign_bundle(statement, root_pk)
-        bundle_path = tmp_path / "bundle.json"
-        bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
-        with pytest.raises(
-            BundleVerificationError, match="self-promotion is refused",
-        ):
-            verify_bundle(bundle_path, root_pk.public_key())
-
-    def test_validation_envelope_declaring_another_validator_fails(
-        self, tmp_path: Path,
-    ) -> None:
-        """A validation envelope whose declared validator_keyid is not the key
-        that signed it must fail: the signature alone would let one validator
-        present a promotion as another validator's work."""
-        root_key = tmp_path / "root.key"
-        _signing.bootstrap_key(root_key)
-        root_pk = _signing.load_private_key(root_key)
-        other_key = tmp_path / "other.key"
-        _signing.bootstrap_key(other_key)
-        other_pk = _signing.load_private_key(other_key)
-        other_pem = _signing.public_key_to_pem(other_pk.public_key())
-
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g.enroll_validator(other_pem, identity="other")
-            cid = g.assert_claim("borrowed identity", generated_by="a")
-
-        envelope = _signing.sign_validation(
-            {
-                "claim_id": cid,
-                "validator_keyid": _signing.public_key_id(other_pk.public_key()),
-                "validated_at": "2026-01-01T00:00:00Z",
-                "evidence_seen": [],
-            },
-            root_pk,  # signed by the root, but declaring the other validator
-        )
-        statement = build_statement(tmp_path)
-        for node in statement["predicate"]["@graph"]:
-            if node.get("claimText") == "borrowed identity":
-                node["supportLevel"] = "ESTABLISHED"
-                node["validationSignature"] = envelope
-                break
-        bundle_path = tmp_path / "bundle.json"
-        bundle_path.write_text(
-            json.dumps(sign_bundle(statement, root_pk)), encoding="utf-8",
-        )
-        with pytest.raises(
-            BundleVerificationError, match="declares validator",
-        ):
-            verify_bundle(bundle_path, root_pk.public_key())
-
-    def test_llm_typed_validator_cannot_back_established(
-        self, tmp_path: Path,
-    ) -> None:
-        """An ESTABLISHED display backed by an llm-typed validator must fail.
-
-        The graph refuses this promotion in process (LLMValidatorPromotionError),
-        and the bundle carries each validator's enrollment-bound validator_type,
-        so the verifier has to enforce the same human-witnessed rule.
-        """
-        root_key = tmp_path / "root.key"
-        _signing.bootstrap_key(root_key)
-        root_pk = _signing.load_private_key(root_key)
-        bot_key = tmp_path / "bot.key"
-        _signing.bootstrap_key(bot_key)
-        bot_pk = _signing.load_private_key(bot_key)
-        bot_pem = _signing.public_key_to_pem(bot_pk.public_key())
-
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g.enroll_validator(bot_pem, identity="bot", validator_type="llm")
-            cid = g.assert_claim("bot promoted", generated_by="a")
-
-        # Build the validation envelope the graph would refuse to accept.
-        envelope = _signing.sign_validation(
-            {
-                "claim_id": cid,
-                "validator_keyid": _signing.public_key_id(bot_pk.public_key()),
-                "validated_at": "2026-01-01T00:00:00Z",
-                "evidence_seen": [],
-            },
-            bot_pk,
-        )
-        statement = build_statement(tmp_path)
-        for node in statement["predicate"]["@graph"]:
-            if node.get("claimText") == "bot promoted":
-                node["supportLevel"] = "ESTABLISHED"
-                node["validationSignature"] = envelope
-                node.pop("validatedBy", None)
-                break
-        bundle_path = tmp_path / "bundle.json"
-        bundle_path.write_text(
-            json.dumps(sign_bundle(statement, root_pk)), encoding="utf-8",
-        )
-        with pytest.raises(BundleVerificationError, match="validator_type='llm'"):
-            verify_bundle(bundle_path, root_pk.public_key())
-
-
-# ---------------------------------------------------------------------------
-# Exported validator chain (the bundle's trust anchor)
 # ---------------------------------------------------------------------------
 
 

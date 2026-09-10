@@ -949,7 +949,7 @@ def _independence_units(
     cache.
 
     The run token is the distinct **signer** (the claim's ``asserter_keyid``),
-    the same WHO the REPLICATED promotion keys on. The denormalized column is not
+    the same WHO a reader counts distinct signers on. The denormalized column is not
     itself signed, so it is trusted only when the claim's bundle authenticates it
     (embeds the same keyid, binds to this claim, and verifies when the signer is
     enrolled); a forged or unbacked keyid falls back to the retired
@@ -1033,7 +1033,7 @@ def independence_counts(
     counts only when the claim's signature bundle authenticates it
     (:func:`mareforma.trust._gate._signer_axis`), so this axis is
     not the unsigned column
-    the REPLICATED promotion query reads; that query is a separate check under
+    the claims-graph independence count reads; that count is a separate check under
     its own editorial filters, and the two answer different questions and can
     differ. So can this count and the trust map's number:
     :func:`effective_independence` re-keys a line with no observed model call to
@@ -1294,12 +1294,9 @@ def proposition_status(
         "independent_refute": refute,
         "lines_skipped": memo.get("skipped", {}).get(content_id, 0),
         "post_hoc": memo.get("post_hoc", {}).get(content_id, False),
-        # ``frame_status`` ("consistent" / "contested") is retired: it echoed the
-        # answer's own status word. ``question_status`` ("consistent" / "divided")
-        # names the state of the question instead. Both are derived from the one
-        # ``frame_status`` computed above, so they cannot disagree about whether
-        # the frame is contested. ``frame_status`` is removed in v0.4.0.
-        "frame_status": frame_status.value,
+        # ``question_status`` ("consistent" / "divided") names the state of the
+        # question. It replaced ``frame_status``, which echoed the answer's own
+        # status word and said nothing the answer had not already said.
         "question_status": question_status_of(frame_status).value,
         "status_policy": STATUS_POLICY,
     }

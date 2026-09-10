@@ -1,10 +1,10 @@
 """
-tests/epistemic/test_trust_ladder.py — Honesty tests for trust ladder boundaries.
+tests/epistemic/test_write_boundaries.py: honesty tests for what the graph
+refuses and what it knowingly permits.
 
-All tests here PASS by design. They pin the ladder's boundaries: the shapes
-the graph refuses at write time, and the limitations it knowingly permits.
-The same posture as test_spurious_replicated in test_support_levels.py:
-make the known limitations explicit and visible.
+All tests here PASS by design. They pin the shapes the graph refuses at write
+time, and the limitations it permits with its eyes open, so a known limitation
+is explicit and visible rather than discovered later.
 
 Scenarios covered
 -----------------
@@ -65,12 +65,12 @@ class TestTrustLaundering:
         table if they want to know who actually validated.
         """
         validator_key_path = _bootstrap_validator_key(tmp_path)
-        # v0.3.7 keys REPLICATED on two distinct non-NULL asserter_keyids, not
+        # A reader counts two lines on two distinct non-NULL asserter_keyids, not
         # on distinct generated_by. Sign the two converging peers with distinct
         # keys so the pair promotes (generated_by stays a display label).
         sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as g:
-            upstream = g.assert_claim("upstream reference", generated_by="seed", seed=True)
+            upstream = g.assert_claim("upstream reference", generated_by="seed")
             id_a = g.assert_claim(
                 "Drug X causes effect Y",
                 supports=[upstream],
@@ -84,7 +84,6 @@ class TestTrustLaundering:
                 signer=sb,
             )
             claim = g.get_claim(id_a)
-            assert claim["support_level"] == "REPLICATED"
             g.enroll_validator(
                 _pem_of(validator_key_path), identity="v",
             )
@@ -96,7 +95,6 @@ class TestTrustLaundering:
             g.validate(id_a, validated_by="attacker@example.org")
 
             claim = g.get_claim(id_a)
-            assert claim["support_level"] == "ESTABLISHED"
             assert claim["validated_by"] == "attacker@example.org"
             assert claim["validation_signature"] is not None
 
@@ -104,10 +102,10 @@ class TestTrustLaundering:
         """validate() stores whatever display string is passed."""
         validator_key_path = _bootstrap_validator_key(tmp_path)
         # Distinct signers on the two converging peers so the pair reaches
-        # REPLICATED under the v0.3.7 asserter-keyid axis (see the test above).
+        # two lines under the asserter-keyid axis (see the test above).
         sa, sb = _two_signers(tmp_path)
         with open_graph(tmp_path) as g:
-            upstream = g.assert_claim("prior", generated_by="seed", seed=True)
+            upstream = g.assert_claim("prior", generated_by="seed")
             rep_id = g.assert_claim("finding", supports=[upstream], generated_by="A", signer=sa)
             g.assert_claim("finding", supports=[upstream], generated_by="B", signer=sb)
             g.enroll_validator(
@@ -119,7 +117,6 @@ class TestTrustLaundering:
 
             claim = g.get_claim(rep_id)
             assert claim["validated_by"] == "NOT_A_REAL_PERSON_12345"
-            assert claim["support_level"] == "ESTABLISHED"
 
 
 # ---------------------------------------------------------------------------
@@ -218,20 +215,19 @@ class TestContradictAndSupport:
 # Launch ship-gate: full-graph end-to-end story
 # ---------------------------------------------------------------------------
 #
-# These tests are the OSS core's ship gate. They exercise the
-# complete trust-ladder story end-to-end:
+# These tests are the OSS core's ship gate. They exercise the whole story
+# end-to-end:
 #
 #   - in-toto Statement v1 + DSSE envelope on every signed claim
 #   - GRADE EvidenceVector inside the signed predicate
 #   - Verdict-issuer protocol: signed verdicts from enrolled validators
-#     promote claims to REPLICATED and invalidate via t_invalid
+#     corroborate a claim, and invalidate one via t_invalid
 #   - Restore round-trips claims + validators + verdicts
 #
 # The launch story DOES NOT include the inference layer (embedder, NLI,
 # semantic-cluster predicate). Those live outside the OSS core. Any
-# external verdict-issuer calls the verdict-issuer protocol below; the
-# OSS core accepts the signed verdicts and gates the trust ladder
-# accordingly.
+# external verdict-issuer calls the verdict-issuer protocol below, and the
+# OSS core accepts the signed verdicts.
 
 
 class TestLaunchSubstrateShipGate:
@@ -278,41 +274,6 @@ class TestLaunchSubstrateShipGate:
         assert "rationale" in ev
         assert "reporting_compliance" in ev
 
-    def test_verdict_issuer_promotes_to_replicated_end_to_end(
-        self, tmp_path: Path,
-    ) -> None:
-        """An enrolled validator's signed replication verdict promotes
-        the referenced pair of claims from PRELIMINARY to REPLICATED.
-        The OSS core accepts the verdict; the predicate that
-        generates it (semantic-cluster, cross-method, hash-match,
-        shared-resolved-upstream) lives outside the OSS."""
-        from mareforma import signing as _signing
-        root_key = tmp_path / "root.key"
-        issuer_key = tmp_path / "issuer.key"
-        _signing.bootstrap_key(root_key)
-        _signing.bootstrap_key(issuer_key)
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            pem = _signing.public_key_to_pem(
-                _signing.load_private_key(issuer_key).public_key(),
-            )
-            g.enroll_validator(pem, identity="external-issuer")
-            a = g.assert_claim("alpha finding", generated_by="lab-A")
-            b = g.assert_claim("beta finding", generated_by="lab-B")
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(b)["support_level"] == "PRELIMINARY"
-        with mareforma.open(tmp_path, key_path=issuer_key) as g:
-            g.record_replication_verdict(
-                verdict_id="rv_launch",
-                cluster_id="cl_launch",
-                member_claim_id=a, other_claim_id=b,
-                method="semantic-cluster",
-                confidence={"cosine": 0.94, "nli_forward": 0.87,
-                            "nli_backward": 0.89},
-            )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
-
     def test_contradiction_verdict_invalidates_and_query_default_excludes(
         self, tmp_path: Path,
     ) -> None:
@@ -341,12 +302,11 @@ class TestLaunchSubstrateShipGate:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             visible_ids = {
                 r["claim_id"]
-                for r in g.query(include_unverified=True)
+                for r in g.query()
             }
             audit_ids = {
                 r["claim_id"]
-                for r in g.query(include_unverified=True,
-                                 include_invalidated=True)
+                for r in g.query(include_invalidated=True)
             }
         assert a not in visible_ids  # invalidated by signed verdict
         assert a in audit_ids
@@ -390,7 +350,6 @@ class TestLaunchSubstrateShipGate:
         assert result["validators_restored"] >= 2
         with mareforma.open(tmp_path, key_path=root_key) as g:
             # b promoted via the replication verdict.
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
             # a was the older of (a, c), so the trigger invalidated it.
             assert g.get_claim(a)["t_invalid"] is not None
             # The replication and contradiction verdicts both round-tripped.

@@ -12,19 +12,18 @@ Runs in a temporary directory with no external dependencies.
 
 Trust reads off the derived axes `graph.proposition_status(prop)` returns:
 `status` per `content_id` (the answer) and `question_status` per `frame_id` (the
-question). Steps 5 and 6 below exercise the stored `support_level` ladder, the
-legacy per-claim axis whose `REPLICATED` / `ESTABLISHED` public labels are
-deprecated for v0.4.0; the walkthrough keeps them because they are still
-functional this release.
+question). Steps 5 and 6 below cover what two independent agents converging is
+worth, and what a human signing off records. Neither writes a level: the ladder
+that used to sit under both is gone.
 
 ## What it covers
 
 1. **Open**: zero setup, no init required
 2. **Assert**: INFERRED, ANALYTICAL, DERIVED classifications
-3. **Query**: text filter, `min_support`, classification, limit
+3. **Query**: text filter, classification, limit
 4. **Idempotency**: retry-safe writes
-5. **REPLICATED**: automatic when two claims under distinct signing keys share upstream evidence
-6. **ESTABLISHED**: human validation only, requires REPLICATED first
+5. **Convergence**: two claims under distinct signing keys sharing upstream evidence
+6. **Validation (human only)**: a signed sign-off, with no automated path
 7. **Operational surfaces**: `health()`, `classify_supports()`
 8. **Anti-patterns**: what silently corrupts the epistemic model
 
@@ -44,8 +43,8 @@ import tempfile, mareforma
 from mareforma import signing
 
 with tempfile.TemporaryDirectory() as tmp:
-    # Two distinct signing keys: REPLICATED keys on distinct asserter keyids,
-    # and the shared upstream must be ESTABLISHED (a seed claim).
+    # Two distinct signing keys: independence keys on distinct asserter
+    # keyids, both citing the same upstream.
     ka, kb = f"{tmp}/a.key", f"{tmp}/b.key"
     signing.bootstrap_key(ka); signing.bootstrap_key(kb)
     signer_b = signing.load_private_key(kb)
@@ -54,7 +53,7 @@ with tempfile.TemporaryDirectory() as tmp:
             signing.public_key_to_pem(signer_b.public_key()), identity="b"
         )
         prior_id = graph.assert_claim(
-            "upstream reference", generated_by="seed", seed=True
+            "upstream reference", generated_by="agent/prior"
         )
         id_a = graph.assert_claim(
             "finding A", supports=[prior_id], generated_by="agent/a"
@@ -63,5 +62,5 @@ with tempfile.TemporaryDirectory() as tmp:
             "finding B", supports=[prior_id], generated_by="agent/b",
             signer=signer_b,
         )
-        assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
+        assert graph.trust_map(id_a)
 ```

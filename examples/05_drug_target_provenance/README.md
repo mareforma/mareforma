@@ -11,8 +11,8 @@ code followed by the console output it prints.
 > **This example is not re-run on every change.** It needs the MEDEA package, a
 > GPU-class machine, ~21 GB of MedeaDB, and an LLM API key. The output blocks
 > below are from the recorded **Case B** run, where MEDEA's data pipeline
-> returned `null`. The classification → support-level → warning are exactly what
-> the code prints for that case; the hypothesis text and claim ids are run-specific
+> returned `null`. The classification and the warning are exactly what the
+> code prints for that case; the hypothesis text and claim ids are run-specific
 > and shown elided.
 
 ## The epistemic question
@@ -29,8 +29,7 @@ records the distinction permanently, at assertion time.
 
 Trust itself reads off the derived axes `graph.proposition_status(prop)` returns:
 `status` per `content_id` (the answer) and `question_status` per `frame_id` (the
-question). The `support_level` ladder this example prints is the legacy stored
-per-claim axis, deprecated for v0.4.0.
+question). Nothing this example writes ranks a claim.
 
 ## Two forks
 
@@ -63,13 +62,13 @@ The recorded Case B run is kept apart from it, under `recorded/`.
 
 ```python
 with mareforma.open(HERE) as graph:
-    # Check for prior REPLICATED findings before running. MEDEA can build on
-    # them rather than starting from scratch.
-    prior = graph.query("drug target", min_support="REPLICATED")
+    # Check for prior findings before running. MEDEA can build on them rather
+    # than starting from scratch.
+    prior = [c for c in graph.query("drug target")]
 ```
 
 ```
-  No prior REPLICATED findings — running both forks fresh.
+  No prior findings, running both forks fresh.
 ```
 
 ## One fork: run, classify, record
@@ -92,7 +91,7 @@ ra_claim_id = graph.assert_claim(
 ```
 
 ```
-  [1/2] Running MEDEA — Rheumatoid Arthritis / CD4+ T cells ...
+  [1/2] Running MEDEA, Rheumatoid Arthritis / CD4+ T cells ...
     Classification: INFERRED
     Finding: <MEDEA's final hypothesis>
     Recorded claim: <claim-id>
@@ -105,11 +104,11 @@ The SLE fork is identical with `generated_by="medea/gpt-4o/sle_cd4"`.
 ```python
 ra_claim  = graph.get_claim(ra_claim_id)
 sle_claim = graph.get_claim(sle_claim_id)
-print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['support_level']}")
-print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['support_level']}")
+print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['claim_id'][:8]}")
+print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['claim_id'][:8]}")
 
 if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
-    # The data pipeline did not run — both findings are LLM prior knowledge.
+    # The data pipeline did not run, both findings are LLM prior knowledge.
     ...
 ```
 
@@ -117,11 +116,11 @@ if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
   ============================================================
   EPISTEMIC STATUS
   ============================================================
-    RA fork:   INFERRED    →  PRELIMINARY
-    SLE fork:  INFERRED    →  PRELIMINARY
+    RA fork:   INFERRED    →  3f2a91c4
+    SLE fork:  INFERRED    →  a07be115
 
     ⚠  One or both forks returned null generated_code.
-       Both findings are INFERRED — the data pipeline did not run.
+       Both findings are INFERRED, the data pipeline did not run.
        This was Case B in the original run. See the README for context.
 ```
 
@@ -138,22 +137,24 @@ The four claims of that run are kept at
 capture, taken before claims were signed, so it carries no signature bundles and
 its `generated_by` reads `medea/gpt-4o` rather than the per-fork label the script
 writes today. `mareforma.restore()` reads it and rebuilds the four claims, but
-they come back unsigned, which the default `query()` drops. Pass
-`include_unverified=True` to read them.
+they come back unsigned, and what you can then read depends on the project you
+restored into. On a project with no key, they are served carrying
+`generator_enrolled=False`. On a project that has enrolled a validator, an
+unsigned row is a row whose signature somebody removed, so the read refuses all
+four and says so as `read_verify_exclusions`. Restore it somewhere with no key
+if you want to read the capture itself.
 
-## Promoting a finding
+## What would make these findings independent
 
-An `INFERRED` finding is recorded, not discarded, and held at `PRELIMINARY`
-until an independent line backs it. To reach `REPLICATED`, two conditions must
-both hold: the converging claims carry **distinct, non-NULL** `asserter_keyid`
-values, **and** both cite the same `ESTABLISHED` upstream claim in `supports[]`.
-`generated_by` is a display label and plays no part in the gate. Without an
-`ESTABLISHED` anchor, mareforma keeps both at `PRELIMINARY` rather than
-promoting noise.
+An `INFERRED` finding is recorded, not discarded. What it lacks is a second
+line behind it, and two things have to be true before a reader can call one
+finding an independent check on another: the two claims carry **distinct,
+non-NULL** `asserter_keyid` values, and both cite the same upstream claim in
+`supports[]`. `generated_by` is a display label and counts for nothing. Without
+a common anchor, two agreeing claims may not even be about the same question.
 
 Both forks here go through one `mareforma.open(HERE)` handle, so one signing
-key, and neither cites an upstream, so both stay `PRELIMINARY`. To promote,
-sign the second fork under a distinct key (`mareforma.open(key_path=...)`, or
-the per-call `signer=` override) and have both cite a shared `ESTABLISHED`
-anchor. See [Example 03](../03_documented_contestation/) for the
-seed-then-converge pattern.
+key, and neither cites an upstream. Neither is a check on the other. To change
+that, sign the second fork under a distinct key (`mareforma.open(key_path=...)`,
+or the per-call `signer=` override) and have both cite a shared anchor. See
+[Example 03](../03_documented_contestation/) for that pattern.

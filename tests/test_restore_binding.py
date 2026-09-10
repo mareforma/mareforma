@@ -65,7 +65,7 @@ def _signed_project(root: Path, text: str) -> tuple[Path, str, str]:
     key = _bootstrap_key(root, "root.key")
     with mareforma.open(root, key_path=key) as g:
         anchor = g.assert_claim(
-            "plain ascii anchor", generated_by="seed", seed=True,
+            "plain ascii anchor", generated_by="seed",
         )
         subject = g.assert_claim(text, generated_by="agent-a")
     return key, anchor, subject
@@ -174,7 +174,7 @@ def _restore_with_one_unsigned_claim(root: Path) -> str:
     """
     key = _bootstrap_key(root, "root.key")
     with mareforma.open(root, key_path=key) as g:
-        g.assert_claim("anchor", generated_by="seed", seed=True)
+        g.assert_claim("anchor", generated_by="seed")
         loose = g.assert_claim("written without the key", generated_by="agent-a")
 
     data = _read_toml(root)

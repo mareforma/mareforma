@@ -76,7 +76,7 @@ def _load_signer(key_path: Path):
 def _two_signers(tmp_path: Path):
     """Bootstrap two distinct signing keys and return loaded signer objects.
 
-    Under the v0.3.7 model, REPLICATED convergence keys on two distinct,
+    A reader counts two lines only on two distinct,
     non-NULL ``asserter_keyid`` values (the per-claim signer keyid), not on
     distinct ``generated_by``. Tests that want two converging claims to
     promote must sign each with a distinct key. This returns ``(sa, sb)``,
@@ -217,7 +217,6 @@ def _claim(**overrides) -> dict:
         "claim_id": "11111111-2222-3333-4444-555555555555",
         "text": "a finding",
         "classification": "ANALYTICAL",
-        "support_level": "PRELIMINARY",
         "status": "open",
         "supports_json": "[]",
         "contradicts_json": "[]",
@@ -322,3 +321,42 @@ def _bootstrap_default_key() -> None:
     kp.parent.mkdir(parents=True, exist_ok=True)
     if not kp.exists():
         signing.bootstrap_key(kp)
+
+
+def rewrite_backup(toml_path, doc) -> None:
+    """Write *doc* as a claims.toml that still accounts for itself.
+
+    A test that edits a backup to plant one tamper has to leave the file's own
+    account of itself intact. Otherwise the reader refuses the file before the
+    planted tamper is reached, and the test proves nothing about the thing it
+    was written for.
+
+    This rebuilds the completeness table over the edited body the way the
+    writer would: counts taken from what the document now holds, digest over
+    the bytes above the table. It is also the faithful position to test from,
+    because an attacker who reaches a downstream check has recomputed that
+    digest too. Recomputing it is free and always was; the table catches the
+    careless edit and never claimed to catch the deliberate one.
+    """
+    import hashlib
+
+    import tomli_w
+
+    from mareforma.db.core import _verdict_chain_completeness
+
+    body_doc = {k: v for k, v in doc.items() if k != "completeness"}
+    body = tomli_w.dumps(body_doc)
+    # Every field measured from the edited document, through the writer's own
+    # computation. Carrying the verdict-chain fields forward from the previous
+    # table left a rewritten file still claiming the chain it used to hold, so
+    # a helper whose whole job is to leave the file accounting for itself
+    # planted a second tamper beside the one the test meant to plant.
+    tail = tomli_w.dumps({"completeness": {
+        **_verdict_chain_completeness(body_doc),
+        "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "sections": {
+            name: len(rows) for name, rows in sorted(body_doc.items())
+            if isinstance(rows, dict)
+        },
+    }})
+    Path(toml_path).write_text(body + tail, encoding="utf-8")

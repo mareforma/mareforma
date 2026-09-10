@@ -12,7 +12,7 @@ claim's trust as a structured, honest ledger instead of a single word.
 Design invariants:
 
 - **Read-side only.** The map is derived from what is already stored and signed.
-  It adds no new signed field; nothing here changes a verdict or a support level.
+  It adds no new signed field; nothing here changes a verdict or a stored row.
 - **Honest, never inferred.** An unobservable property is stated as such
   (``DEFERRED`` / ``not present`` / ``UNVERIFIABLE``), never guessed. A property
   the observer could not see is not a confident answer.
@@ -34,7 +34,7 @@ from ._canonical import canonicalize
 # Version of the trust-map shape. Bound into the rendered record so a consumer
 # knows which property set + tier semantics produced it, and a future revision
 # is distinguishable rather than silently reinterpreted.
-TRUST_MAP_VERSION = "v0.3.14"
+TRUST_MAP_VERSION = "v0.4.0"
 
 # Observed-grounding axis versions KNOWN to carry the verdict↔citation binding.
 # An ALLOWLIST, not a denylist: only a GROUNDED verdict stamped with one of these
@@ -586,22 +586,25 @@ _MULTI_ROOT_IS_TAMPER = _multi_root_is_tamper()
 
 def _standing_property(claim: dict) -> TrustProperty:
     """Place standing / ratification: the computed gate, human-in-the-loop by design."""
-    level = claim.get("support_level") or "PRELIMINARY"
+    # Read off the signed envelope rather than a stored word. The word was the
+    # ladder's, and a word a direct writer could set was never the evidence:
+    # the envelope is, and it is what survived the ladder.
     verified = claim.get("verified")
-    if level == "ESTABLISHED":
+    if claim.get("validation_signature"):
+        value = "VALIDATED" if verified else "VALIDATION_UNVERIFIED"
         detail = (
-            "ratified to ESTABLISHED by a signed human-validator envelope"
+            "a human validator signed off on this claim, and the envelope "
+            "verifies on read"
             if verified
-            else "marked ESTABLISHED but the validation envelope did not verify on read"
+            else "carries a validation envelope that did not verify on read"
         )
-    elif level == "REPLICATED":
-        detail = "REPLICATED by distinct-signer convergence; ratification to ESTABLISHED is human-in-the-loop by design"
     else:
-        detail = "PRELIMINARY; no ratification gate cleared"
+        value = "UNRATIFIED"
+        detail = "nobody has signed off on this claim; no ratification gate cleared"
     return TrustProperty(
         name="standing",
         tier=Tier.COMPUTED,
-        value=level,
+        value=value,
         residual=detail,
     )
 
@@ -677,8 +680,9 @@ def _witnessing_property(
             tier=Tier.COMPUTED,
             value="not witnessed",
             residual=(
-                "signed but no transparency-log inclusion; the log was not enabled, "
-                "so the top of the support ladder is unreachable (it requires witnessing)"
+                "signed but no transparency-log inclusion; the log was not "
+                "enabled, so nothing outside this machine saw the claim when it "
+                "was made"
             ),
         )
     return TrustProperty(
@@ -718,19 +722,19 @@ def build_trust_map(
 
     n_roots = len(_validators.enrollment_roots(conn))
     has_inclusion = _has_rekor_inclusion(conn, claim_id)
-    # Attributability must reflect an ACTUAL signature check, not the promotion
-    # gate: get_claim's ``verified`` passes PRELIMINARY rows through True without
-    # re-verifying, so trusting it would make the map assert "signature
-    # re-verified on read" for a signed PRELIMINARY claim it never checked (and
-    # miss a tamper). Run the audit-grade, tier-independent re-verification here,
+    # Attributability must reflect an ACTUAL signature check of its own. It is
+    # asked here rather than read off get_claim so the map cannot inherit a
+    # verdict computed for another purpose and assert "signature
+    # re-verified on read" for a signed claim it never checked (and
+    # miss a tamper). Run the audit-grade re-verification here,
     # the same one ``mareforma verify`` uses, so the standalone map is honest.
     sig_verified = None
     asserter_enrolled = None
     # EITHER column, not both. Gating on both let a row carrying a stapled
     # ``asserter_keyid`` and no bundle skip the check entirely, so
     # ``att_verified`` fell back to the stored ``verified`` gate below, which
-    # get_claim passes through True for PRELIMINARY rows. The map then read
-    # "signature re-verified on read" beside a keyid, for a claim with no
+    # get_claim passes through True for a row it did not check. The map then
+    # read "signature re-verified on read" beside a keyid, for a claim with no
     # signature at all, while ``mareforma verify`` called the same claim
     # tampered. The MCP server now exposes this map standalone, with no verdict
     # beside it, so the disagreement had nothing to correct it.
@@ -1001,8 +1005,8 @@ def _assemble(
     because they heal silently on the way in. ``sig_verified`` is the result of an ACTUAL
     audit-grade signature re-verification (``verify_claim_signatures``); when
     ``None`` (a direct caller that did not run one) it falls back to the stored
-    ``verified`` column, which is the support-level read gate, NOT a signature
-    check on PRELIMINARY rows. ``asserter_enrolled`` is ``False`` when the signed
+    ``verified`` column, which is the read gate's own answer and NOT an
+    audit-grade check. ``asserter_enrolled`` is ``False`` when the signed
     asserter is not an enrolled validator: ``verify_claim_signatures`` passes
     (binding only, no pubkey to check against), so the map must not claim the
     signature was cryptographically re-verified.
@@ -1045,8 +1049,10 @@ def _assemble(
         tier=Tier.COMPUTED,
         value=f"{n_supports} supports / {n_contradicts} contradicts",
         residual=(
-            "the declared provenance graph the asserter recorded; a declaration, "
-            "not proof that the cited upstreams were used"
+            "the provenance graph the asserter declared, not proof the cited "
+            "upstreams were used. It is no longer the only word on that: the "
+            "grounding axis is computed from the run, and reads UNGROUNDED "
+            "over a claim whose citations no observed read stands behind"
         ),
     )
 

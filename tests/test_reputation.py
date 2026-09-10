@@ -19,97 +19,6 @@ from tests._helpers import _bootstrap_key, _pem_of, _two_signers
 # include_unverified filter
 # ---------------------------------------------------------------------------
 
-class TestIncludeUnverifiedFilter:
-    def test_default_excludes_unsigned_preliminary(self, tmp_path: Path) -> None:
-        """Unsigned PRELIMINARY claims are filtered by default — unsigned
-        mode operates without a validators chain, so the generator is
-        not an enrolled identity."""
-        with mareforma.open(tmp_path) as g:
-            g.assert_claim("alpha")
-            g.assert_claim("beta")
-        with mareforma.open(tmp_path) as g:
-            results = g.query()
-        assert results == []
-
-    def test_include_unverified_true_surfaces_unsigned(
-        self, tmp_path: Path,
-    ) -> None:
-        with mareforma.open(tmp_path) as g:
-            g.assert_claim("alpha")
-            g.assert_claim("beta")
-        with mareforma.open(tmp_path) as g:
-            results = g.query(include_unverified=True)
-        assert len(results) == 2
-
-    def test_default_includes_signed_preliminary_from_enrolled_keyid(
-        self, tmp_path: Path,
-    ) -> None:
-        """A PRELIMINARY claim signed by an enrolled validator (the
-        auto-enrolled root) is surfaced by the default filter."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g.assert_claim("alpha")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            results = g.query()
-        assert len(results) == 1
-
-    def test_default_filters_preliminary_from_unenrolled_keyid(
-        self, tmp_path: Path,
-    ) -> None:
-        """A claim signed by a key NOT in the validators table is
-        unverified at the generator level — filtered by default."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        other_key = _bootstrap_key(tmp_path, "other.key")
-
-        # Root opens first so it auto-enrolls. Then re-open with the
-        # other key, `other` is NOT enrolled and signs a PRELIMINARY
-        # claim, which the default filter must exclude.
-        with mareforma.open(tmp_path, key_path=root_key):
-            pass
-        with mareforma.open(tmp_path, key_path=other_key) as g:
-            g.assert_claim("from unenrolled key")
-
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            default_results = g.query()
-            opt_in_results = g.query(include_unverified=True)
-
-        assert default_results == []
-        assert len(opt_in_results) == 1
-
-    def test_filter_only_applies_to_preliminary(self, tmp_path: Path) -> None:
-        """REPLICATED claims are not subject to the include_unverified
-        filter — they already require the enrolled-chain check via
-        REPLICATED's graph gates."""
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("seed", generated_by="seed", seed=True)
-            g.assert_claim(
-                "rep", supports=[seed], generated_by="A", signer=sa,
-            )
-            g.assert_claim(
-                "rep", supports=[seed], generated_by="B", signer=sb,
-            )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            default_results = g.query()
-        # Three rows: seed (ESTABLISHED), rep-A (REPLICATED), rep-B
-        # (REPLICATED). The two rep rows are signed by keys that are NOT
-        # enrolled, so only their non-PRELIMINARY level keeps them on the
-        # default read surface.
-        assert len(default_results) == 3
-        rep_rows = [
-            r for r in default_results if r["support_level"] != "ESTABLISHED"
-        ]
-        assert [r["support_level"] for r in rep_rows] == [
-            "REPLICATED", "REPLICATED",
-        ]
-        assert all(r["generator_enrolled"] is False for r in rep_rows)
-
-
-# ---------------------------------------------------------------------------
-# validator_reputation per-row projection
-# ---------------------------------------------------------------------------
-
 class TestValidatorReputationProjection:
     def _seed_and_promote(
         self,
@@ -119,11 +28,11 @@ class TestValidatorReputationProjection:
         validator_key: Path,
     ) -> list[str]:
         """Build a graph with *n_promotions* claims promoted to
-        ESTABLISHED under *validator_key*. Returns the promoted ids."""
+        validated under *validator_key*. Returns the validated ids."""
         rep_ids: list[str] = []
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("seed", generated_by="seed", seed=True)
+            seed = g.assert_claim("seed", generated_by="seed")
             for i in range(n_promotions):
                 rep_id = g.assert_claim(
                     f"finding {i}", supports=[seed], generated_by=f"A{i}",
@@ -148,27 +57,16 @@ class TestValidatorReputationProjection:
         rep_ids = self._seed_and_promote(tmp_path, 3, root_key, validator_key)
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            results = g.query(min_support="ESTABLISHED", limit=50)
+            results = g.query(limit=50)
 
-        # The seed claim is also ESTABLISHED, filter to the promoted set.
+        # Every claim comes back, so narrow to the ones promoted above.
         promoted = [r for r in results if r["claim_id"] in rep_ids]
         assert len(promoted) == 3
         for r in promoted:
             # Each promoted claim's reputation equals the validator's
-            # total ESTABLISHED-validation count (3 promotions under
+            # total validation count (3 sign-offs under
             # the same validator key).
             assert r["validator_reputation"] == 3
-
-    def test_preliminary_row_reputation_is_zero(self, tmp_path: Path) -> None:
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g.assert_claim("preliminary")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            results = g.query(min_support="PRELIMINARY")
-        prelim_rows = [r for r in results if r["support_level"] == "PRELIMINARY"]
-        assert prelim_rows
-        for r in prelim_rows:
-            assert r["validator_reputation"] == 0
 
     def test_generator_enrolled_true_for_root_signed(
         self, tmp_path: Path,
@@ -187,7 +85,7 @@ class TestValidatorReputationProjection:
         with mareforma.open(tmp_path) as g:
             g.assert_claim("unsigned")
         with mareforma.open(tmp_path) as g:
-            results = g.query(include_unverified=True)
+            results = g.query()
         assert len(results) == 1
         assert results[0]["generator_enrolled"] is False
 
@@ -201,46 +99,9 @@ class TestGetValidatorReputation:
         root_key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             reputation = g.get_validator_reputation()
-        # Root is auto-enrolled but has zero ESTABLISHED claims yet.
+        # Root is auto-enrolled but has signed off on nothing yet.
         assert len(reputation) == 1
         assert list(reputation.values()) == [0]
-
-    def test_validator_count_matches_promotions(
-        self, tmp_path: Path,
-    ) -> None:
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        v_key = _bootstrap_key(tmp_path, "v.key")
-        v_keyid = _signing.public_key_id(
-            _signing.load_private_key(v_key).public_key(),
-        )
-        # Promote 5 ESTABLISHED claims under v_key.
-        rep_ids: list[str] = []
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("seed", generated_by="seed", seed=True)
-            for i in range(5):
-                rep_id = g.assert_claim(
-                    f"f{i}", supports=[seed], generated_by=f"A{i}", signer=sa,
-                )
-                g.assert_claim(
-                    f"f{i}", supports=[seed], generated_by=f"B{i}", signer=sb,
-                )
-                rep_ids.append(rep_id)
-            g.enroll_validator(_pem_of(v_key), identity="v")
-        with mareforma.open(tmp_path, key_path=v_key) as g:
-            for rep_id in rep_ids:
-                g.validate(rep_id)
-
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            reputation = g.get_validator_reputation()
-
-        assert reputation[v_keyid] == 5
-        # The root signed the seed claim, which is ESTABLISHED, that
-        # bootstrap event counts as one validation under the root keyid.
-        root_keyid = _signing.public_key_id(
-            _signing.load_private_key(root_key).public_key(),
-        )
-        assert reputation[root_keyid] == 1
 
     def test_unenrolled_keyids_absent_from_reputation(
         self, tmp_path: Path,
@@ -262,7 +123,7 @@ class TestGetValidatorReputation:
         )
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("seed", generated_by="seed", seed=True)
+            seed = g.assert_claim("seed", generated_by="seed")
             id1 = g.assert_claim(
                 "f1", supports=[seed], generated_by="A1", signer=sa,
             )
@@ -296,7 +157,7 @@ class TestValidatorKeyidColumn:
         )
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            seed = g.assert_claim("seed", generated_by="seed", seed=True)
+            seed = g.assert_claim("seed", generated_by="seed")
             rep_id = g.assert_claim(
                 "f", supports=[seed], generated_by="A", signer=sa,
             )

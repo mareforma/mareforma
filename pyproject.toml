@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mareforma"
-version = "0.3.14"
+version = "0.4.0"
 description = "Local verification layer for AI-assisted research"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -80,6 +80,11 @@ test-heavy = [
     "aiohttp>=3.9",
     "requests>=2.31",
     "responses>=0.24",
+    # The agent tools are handed to a wrapper that builds a schema from the
+    # signature, and what that wrapper does with an argument the signature no
+    # longer has is a property worth holding. Pinned here so the test runs
+    # rather than skipping quietly on every leg.
+    "langchain-core>=0.3",
 ]
 
 [project.scripts]
@@ -99,23 +104,12 @@ mareforma = ["py.typed"]
 testpaths = ["tests"]
 addopts = "-v --tb=short --strict-markers -m 'not sdist'"
 filterwarnings = [
-    # The seed-anchor deprecation fires on ~180 seed=True call sites across the
-    # suite, most of them incidental scaffolding for tests about something else.
-    # Ignore it suite-wide, scoped by message and category so nothing else is
-    # touched. A blanket `error` is a trust-root defect: it would raise on the
-    # irrevocable root-enrollment notice (validators.py) before its stderr
-    # fallback runs. That the warning actually fires is proved by
-    # tests/test_seed_deprecation.py, which escalates this exact message to an
-    # error locally rather than suite-wide.
-    'ignore:assert_claim\(seed=True\) is deprecated:DeprecationWarning',
-    # Same treatment, same reason: the support-ladder retirement now warns on
-    # query(min_support=...), the path real callers take, and ~40 suite call
-    # sites pass it as scaffolding for tests about something else. It is proved
-    # to fire in tests/test_min_support_deprecation.py.
-    'ignore:query\(min_support=\.\.\.\) is deprecated:DeprecationWarning',
-    # Same treatment, same reason: the row-only refutation_status now warns,
-    # and the suite exercises that signature deliberately in the tests that pin
-    # what a caller with no graph is told. Proved to fire in
+    # The row-only refutation_status warns, and the suite exercises that
+    # signature deliberately in the tests that pin what a caller with no graph
+    # is told. Ignore it suite-wide, scoped by message and category so nothing
+    # else is touched. A blanket `error` is a trust-root defect: it would raise
+    # on the irrevocable root-enrollment notice (validators.py) before its
+    # stderr fallback runs. Proved to fire in
     # tests/test_contradiction_replay.py::TestWithoutAConnection.
     'ignore:refutation_status\(row\) without a connection:DeprecationWarning',
 ]

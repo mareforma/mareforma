@@ -201,7 +201,7 @@ class TestResultSizeCap:
         )
         with pytest.raises(ResultTooLargeError, match="cap is 64"):
             pta.call()
-        assert graph.query(include_unverified=True) == []
+        assert graph.query() == []
 
 
 class _VersionlessMock:
@@ -257,7 +257,7 @@ class TestExecClassClaim:
         pta = ProvenanceToolAdapter(tool=_PythonExecMock({}), graph=graph)
         with pytest.raises(ToolCallError, match="image_digest"):
             pta.call(code="print(1)")
-        assert graph.query(include_unverified=True) == []
+        assert graph.query() == []
 
     def test_refuses_when_one_field_is_missing(self, graph):
         from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
@@ -295,7 +295,7 @@ class TestExecClassClaim:
         )
         with pytest.raises(PredicateBoundaryError):
             pta.call(code="print('</predicate>')")
-        assert graph.query(include_unverified=True) == []
+        assert graph.query() == []
 
 
 class _CacheHitMock:
@@ -332,13 +332,12 @@ class TestCacheLineage:
             tmp_path, key_path=_bootstrap_key(tmp_path, "root.key"),
         ) as graph:
             anchor = graph.assert_claim(
-                "anchor", generated_by="seed", seed=True,
+                "anchor", generated_by="seed",
             )
             peer = graph.assert_claim(
                 "an honest peer finding", supports=[anchor],
                 generated_by="lab_b", signer=sb,
             )
-            assert graph.get_claim(peer)["support_level"] == "PRELIMINARY"
 
             pta = ProvenanceToolAdapter(
                 tool=_CacheHitMock(anchor), graph=graph,
@@ -347,8 +346,6 @@ class TestCacheLineage:
 
             row = graph.get_claim(result["metadata"]["mareforma_claim_id"])
             assert json.loads(row["supports_json"]) == []
-            assert row["support_level"] == "PRELIMINARY"
-            assert graph.get_claim(peer)["support_level"] == "PRELIMINARY"
             predicate = decode_predicate_from_text(row["text"])
             assert predicate["cache_original_claim_id"] == anchor
 
@@ -416,7 +413,7 @@ class TestAsyncCall:
         )
         with pytest.raises(ToolCallError, match="start_call raised"):
             asyncio.run(pta.call_async(target="EGFR"))
-        assert graph.query(include_unverified=True) == []
+        assert graph.query() == []
 
     def test_a_failed_await_writes_no_claim(self, graph):
         from mareforma.adapters.tooluniverse import ProvenanceToolAdapter
@@ -425,7 +422,7 @@ class TestAsyncCall:
         )
         with pytest.raises(ToolCallError, match="await raised"):
             asyncio.run(pta.call_async(target="EGFR"))
-        assert graph.query(include_unverified=True) == []
+        assert graph.query() == []
 
 
 class TestToolCallRecorder:

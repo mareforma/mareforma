@@ -75,7 +75,7 @@ _GPT = "gpt-4o-2024-08-06"
 # The six tables a trust gate reads, per the design's section 1 inventory. The
 # first five feed the independence-count gate through ``INDEPENDENCE_COUNTS_SQL``
 # and are swept against ``proposition_status``; ``replication_verdicts`` feeds
-# the separate corroboration gate and is swept against ``support_level`` in its
+# the separate corroboration gate and is swept against the stored columns in its
 # own class.
 _COUNT_GATE_TABLES = (
     "findings",
@@ -1098,7 +1098,6 @@ class TestReplicationVerdictSweep:
                 method="semantic-cluster", confidence={"cosine": 0.9},
             )
         with mareforma.open(tmp_path, key_path=ka) as g:
-            assert g.get_claim(lone)["support_level"] == "PRELIMINARY"
 
             conn = g._conn
             columns = conn.execute(
@@ -1125,10 +1124,6 @@ class TestReplicationVerdictSweep:
                         (value,),
                     )
                     swept += 1
-                    assert g.get_claim(lone)["support_level"] == "PRELIMINARY", (
-                        f"replication_verdicts.{name}: a verdict edit promoted a "
-                        "lone claim"
-                    )
                 except sqlite3.Error:
                     pass
                 finally:

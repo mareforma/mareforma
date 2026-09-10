@@ -9,8 +9,6 @@ CREATE TABLE IF NOT EXISTS claims (
     text            TEXT NOT NULL,
     classification  TEXT NOT NULL DEFAULT 'INFERRED'
                         CHECK (classification IN ('INFERRED', 'ANALYTICAL', 'DERIVED')),
-    support_level   TEXT NOT NULL DEFAULT 'PRELIMINARY'
-                        CHECK (support_level IN ('PRELIMINARY', 'REPLICATED', 'ESTABLISHED')),
     idempotency_key TEXT,
     validated_by    TEXT,
     validated_at    TEXT,
@@ -28,19 +26,19 @@ CREATE TABLE IF NOT EXISTS claims (
     transparency_logged INTEGER NOT NULL DEFAULT 1
                         CHECK (transparency_logged IN (0, 1)),
     validation_signature TEXT,
-    -- Denormalized from validation_signature's payload for indexable
-    -- reputation queries. NULL for non-ESTABLISHED rows. The envelope
-    -- remains authoritative; if this column ever drifts from the
-    -- envelope it is the envelope that wins.
+    -- Denormalized from validation_signature's payload. NULL on rows nobody
+    -- validated. The envelope is authoritative and the read path enforces it:
+    -- a row whose column disagrees with its own envelope about who signed off
+    -- is refused rather than served either way round, and the reputation count
+    -- groups by the signer named INSIDE the envelope, not by this column.
     validator_keyid TEXT,
     -- Denormalized asserter keyid from the claim's signature_bundle (the
     -- primary/asserter-role signature). NULL on unsigned rows and on legacy
     -- rows written before this column existed. Mirrors validator_keyid: the
     -- signature_bundle stays authoritative, this is the indexable projection
-    -- the REPLICATED promotion query and the trust-layer independence count
-    -- both read, so neither walks the bundle JSON. A REPLICATED row with a
-    -- NULL asserter_keyid is necessarily a legacy (pre-build) promotion: the
-    -- current rule refuses to promote a NULL-asserter row.
+    -- the trust-layer independence count reads, so it does not walk the
+    -- bundle JSON. A NULL here means nothing signed the row, and a reader
+    -- counting distinct signers cannot count it as one.
     asserter_keyid  TEXT,
     artifact_hash   TEXT,
     prev_hash       TEXT,
@@ -77,18 +75,6 @@ CREATE TABLE IF NOT EXISTS claims (
     -- IS a legitimate mutation, gated by the trigger that only fires
     -- on a signed verdict INSERT from an enrolled validator.
     t_invalid       INTEGER,
-    -- Convergence-detection retry flag. Set to 1 by
-    -- _maybe_update_replicated when a SQLite trigger or contention
-    -- pattern causes the post-INSERT promotion check to fail. The
-    -- mareforma swallows the error so writes never crash, but a
-    -- swallowed error leaves the claim stuck at PRELIMINARY forever
-    -- unless someone retries. EpistemicGraph.refresh_convergence()
-    -- walks every flagged row, re-runs detection, and clears the flag
-    -- on success. Like ``unresolved``, this column is OUTSIDE the
-    -- claims_signed_fields_no_laundering watch list, flipping it is
-    -- a legitimate operational mutation, not predicate tampering.
-    convergence_retry_needed INTEGER NOT NULL DEFAULT 0
-                            CHECK (convergence_retry_needed IN (0, 1)),
     -- Predicate-type-specific structured payload. Adapters that ship
     -- a distinct predicateType (tool-call/v1, ingested-trace/v1,
     -- gemini/*/v1, wet-lab-assay/*, review/v1, elo-match/v1, ...)
@@ -124,20 +110,31 @@ CREATE TABLE IF NOT EXISTS claims (
     -- receipt_digest}. Distinct from the declared
     -- ``classification`` column above and never overlapping its value space.
     -- Written from the same record bound into the signed predicate, so this is
-    -- a queryable denormalisation the split measurement and the promotion gate
-    -- read; the signed envelope stays authoritative. NULL on every claim
+    -- a queryable denormalisation the split measurement reads; the signed
+    -- envelope stays authoritative. NULL on every claim
     -- asserted without the observer (including every row that predates this
     -- column), and a NULL here means the signed predicate omits the field too,
     -- so the signed bytes are byte-identical to a pre-observer claim.
     observed_grounding TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
-    -- ESTABLISHED rows must carry a signed validation envelope. The
-    -- trigger below also enforces this on UPDATE; the CHECK is the
-    -- row-level belt to the trigger's transition-level suspenders.
-    -- ``validated_by`` is a display label (the cryptographic identity
-    -- lives in ``validation_signature``) and may be NULL.
-    CHECK (support_level != 'ESTABLISHED' OR validation_signature IS NOT NULL)
+
+    -- A row cannot say a human validated it without the envelope that proves
+    -- one did. ``validation_signature`` is the payload, and ``validated_at``
+    -- is denormalised out of it.
+    --
+    -- ``validated_by`` is NOT. It is a human-readable name the caller passes,
+    -- it is in no signed payload, and nothing can check it against one. What
+    -- backs a validation is the KEY, verified through its enrollment chain; the
+    -- name beside it is a label for a reader. Do not treat it as attribution
+    -- that anybody signed.
+    --
+    -- The ladder's CHECK used to cover this from the other side, by requiring
+    -- the envelope on any row at the top of it, and it went with the level. The
+    -- claim it was really making has nothing to do with levels and survives
+    -- them: a validation nobody signed is not a validation.
+    CHECK (validation_signature IS NOT NULL
+           OR (validated_by IS NULL AND validated_at IS NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_claims_status
@@ -146,24 +143,18 @@ CREATE INDEX IF NOT EXISTS idx_claims_source
     ON claims(source_name);
 CREATE INDEX IF NOT EXISTS idx_claims_generated_by
     ON claims(generated_by);
-CREATE INDEX IF NOT EXISTS idx_claims_support_level
-    ON claims(support_level);
 CREATE INDEX IF NOT EXISTS idx_claims_unresolved
     ON claims(unresolved);
 CREATE INDEX IF NOT EXISTS idx_claims_transparency_logged
     ON claims(transparency_logged);
 CREATE INDEX IF NOT EXISTS idx_claims_artifact_hash
     ON claims(artifact_hash) WHERE artifact_hash IS NOT NULL;
--- Partial index on flagged retries only, refresh_convergence iterates
--- this set; the index keeps the walk O(retry-pending) rather than O(N).
-CREATE INDEX IF NOT EXISTS idx_claims_convergence_retry
-    ON claims(claim_id) WHERE convergence_retry_needed = 1;
--- Reputation reads aggregate ESTABLISHED claims per validator. Partial
--- on NOT NULL keeps index storage proportional to ESTABLISHED-only rows.
+-- Reputation reads aggregate validated claims per validator. Partial on NOT
+-- NULL keeps index storage proportional to the rows that carry a validator.
 CREATE INDEX IF NOT EXISTS idx_claims_validator_keyid
     ON claims(validator_keyid) WHERE validator_keyid IS NOT NULL;
--- Independence counting and REPLICATED distinctness filter on a non-NULL
--- asserter_keyid. Partial on NOT NULL keeps storage proportional to signed rows.
+-- Independence counting filters on a non-NULL asserter_keyid. Partial on NOT
+-- NULL keeps storage proportional to signed rows.
 CREATE INDEX IF NOT EXISTS idx_claims_asserter_keyid
     ON claims(asserter_keyid) WHERE asserter_keyid IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_idempotency_key
@@ -187,45 +178,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_prev_hash
 -- `_state_error_from_integrity` keys off the suffix shape; downstream
 -- callers that need to know "what NEW value was rejected" can inspect
 -- the row's pre-image directly.
-CREATE TRIGGER IF NOT EXISTS claims_insert_state_check
-BEFORE INSERT ON claims
-BEGIN
-    SELECT CASE
-        WHEN NEW.support_level NOT IN ('PRELIMINARY', 'ESTABLISHED') THEN
-            RAISE(ABORT, 'mareforma:state:insert_invalid_level')
-        WHEN NEW.support_level = 'ESTABLISHED' AND
-             NEW.validation_signature IS NULL THEN
-            RAISE(ABORT, 'mareforma:state:insert_established_without_validation')
-        WHEN NEW.support_level = 'PRELIMINARY' AND
-             (NEW.validated_by IS NOT NULL OR NEW.validated_at IS NOT NULL) THEN
-            RAISE(ABORT, 'mareforma:state:insert_preliminary_with_validation')
-    END;
-END;
-
-CREATE TRIGGER IF NOT EXISTS claims_update_state_check
-BEFORE UPDATE OF support_level ON claims
-BEGIN
-    SELECT CASE
-        WHEN OLD.support_level = 'PRELIMINARY' AND
-             NEW.support_level NOT IN ('PRELIMINARY', 'REPLICATED') THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:from_preliminary')
-        WHEN OLD.support_level = 'REPLICATED' AND
-             NEW.support_level NOT IN ('REPLICATED', 'ESTABLISHED') THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:from_replicated')
-        WHEN OLD.support_level = 'ESTABLISHED' AND
-             NEW.support_level != 'ESTABLISHED' THEN
-            RAISE(ABORT, 'mareforma:state:illegal_transition:from_established')
-        WHEN NEW.support_level = 'ESTABLISHED' AND
-             NEW.validation_signature IS NULL THEN
-            RAISE(ABORT, 'mareforma:state:established_without_validation')
-    END;
-END;
-
 -- Retracted is terminal. Without this, an adversary could assert a
--- born-retracted claim, flip it back to 'open' via update_claim (a pure
--- status mutation never triggers a REPLICATED re-check), and then ride
--- an honest peer's INSERT into REPLICATED. The signed envelope does not
--- bind status, so the resurrection carries no signature evidence. Make
+-- born-retracted claim and flip it back to 'open' via update_claim, so a
+-- withdrawn finding returns to every default read with nothing recording
+-- that it was ever withdrawn. The signed envelope does not bind status, so
+-- the resurrection carries no signature evidence. Make
 -- retraction one-way at the storage layer: to resurrect a withdrawn
 -- finding, assert a new claim citing the old via contradicts=[<old>].
 CREATE TRIGGER IF NOT EXISTS claims_update_status_terminal
@@ -240,7 +197,7 @@ END;
 -- A signed claim cannot be deleted. The signature + Rekor entry + chain
 -- hash collectively attest "this claim was asserted by this signer at
 -- this time"; allowing a delete would let a process with DB access wipe
--- a Rekor-logged ESTABLISHED claim and rewrite claims.toml as if it never
+-- a Rekor-logged claim and rewrite claims.toml as if it never
 -- existed (the Rekor entry persists, but the local graph forgets the
 -- context that points to it). The whole "append-only over the signed
 -- predicate" framing requires this trigger as the twin of
@@ -489,9 +446,9 @@ CREATE TABLE IF NOT EXISTS validators (
 # The Statement v1 envelope + signature binds every SIGNED_FIELDS value plus
 # the evidence vector, the observed-grounding verdict and the statement_cid
 # anchor. observed_grounding is watched for the same reason as the evidence
-# vector, one step sharper: it gates support-level promotion, so a single
-# UPDATE flipping it to GROUNDED lifts exactly the claims the observer refused
-# to promote. Without this trigger, a
+# vector, one step sharper: it is the observer's verdict about whether data
+# reached the finding, so a single UPDATE flipping it to GROUNDED overturns
+# exactly the answer the observer computed. Without this trigger, a
 # direct `UPDATE claims SET ev_risk_of_bias = 0 WHERE …` would silently
 # retroactively upgrade a claim's evidence quality , signature verification on
 # the unchanged envelope would still pass, but the row no longer matches what
@@ -514,15 +471,50 @@ CREATE TABLE IF NOT EXISTS validators (
 # restore's signature-vs-row binding.
 #
 # asserter_keyid is watched for the same reason, one step removed. It is an
-# unsigned denormalisation of the bundle's signer that the REPLICATED promotion
-# query and the trust-layer independence count both read, so a row that
-# contradicts its own envelope inflates the distinct-signer count.
+# unsigned denormalisation of the bundle's signer that the trust-layer
+# independence count reads, so a row that contradicts its own envelope
+# inflates the distinct-signer count.
 #
 # predicate_payload is watched on the same ground. It stays outside the signed
 # envelope, but the audit path reads the finding's citation set out of it to
 # re-check a GROUNDED verdict against the sources the finding names, so one
 # UPDATE clearing it turns a binding violation into a clean verdict. The column
 # is only ever written at INSERT; a change on a signed row is tampering.
+# A validation is terminal, and until now only Python said so. The write path
+# gates its UPDATE on ``validation_signature IS NULL``, which binds every caller
+# that comes through this library and nobody else: a second enrolled validator
+# refused by ``validate()`` could sign its own envelope, write it with plain
+# sqlite3, and the row would read verified under the new name with the first
+# validator's envelope gone and nothing recording that it was ever there. The
+# read path cannot notice, because the envelope that survives verifies.
+#
+# The columns are watched together because the display fields are denormalised
+# out of the signed payload: moving ``validated_by`` alone would leave the row
+# naming one person and the envelope another.
+#
+# Fires only when the row ALREADY carries an envelope, so the honest write, the
+# first validation on a row that had none, passes through untouched. There is no
+# legitimate second write: to record another reviewer's reading, assert it as
+# its own claim rather than over the top of theirs.
+_VALIDATION_TERMINAL_TRIGGER_NAME = "claims_validation_is_terminal"
+
+_VALIDATION_TERMINAL_TRIGGER_SQL = """\
+CREATE TRIGGER claims_validation_is_terminal
+BEFORE UPDATE OF
+    validation_signature, validator_keyid, validated_by, validated_at
+ON claims
+WHEN OLD.validation_signature IS NOT NULL
+  AND (
+        OLD.validation_signature IS NOT NEW.validation_signature
+     OR OLD.validator_keyid IS NOT NEW.validator_keyid
+     OR OLD.validated_by IS NOT NEW.validated_by
+     OR OLD.validated_at IS NOT NEW.validated_at
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'mareforma:append_only:validation_is_terminal');
+END"""
+
+
 _SIGNED_FIELDS_TRIGGER_NAME = "claims_signed_fields_no_laundering"
 
 _SIGNED_FIELDS_TRIGGER_SQL = """\
@@ -562,56 +554,6 @@ WHEN OLD.signature_bundle IS NOT NULL
   )
 BEGIN
     SELECT RAISE(ABORT, 'mareforma:append_only:signed_field_locked');
-END"""
-
-
-# support_level is the trust ladder, and it is the one column the honest paths
-# rewrite after signing, so it cannot join the list above: the level is derived
-# state, promoted later than the signature that binds the claim's content. What
-# it can be held to is the writer. The two transitions the state machine permits
-# (PRELIMINARY -> REPLICATED, REPLICATED -> ESTABLISHED) are legal only inside a
-# promotion window, and only ``core._promotion_window`` opens one. A statement
-# from anywhere else is refused, on a signed row, for the same reason the
-# laundering trigger refuses one: the row carries a commitment the writer did
-# not make. The marker is a temp table, so it is per connection: a co-resident
-# process opening graph.db with plain sqlite3 has no temp schema of its own to
-# find it in and is refused.
-#
-# The marker has to be state, not a connection-scoped SQL function. Trigger text
-# is durable schema and SQLite resolves the names in it when it compiles the
-# UPDATE, so a function only this release registers makes support_level
-# unwritable by every other connection that opens the file, an older mareforma
-# included, instead of refusing the two guarded transitions. A temp table cannot
-# be named directly from a trigger (cross-schema references are refused at CREATE
-# time), so the WHEN clause probes for it through pragma_table_info, a
-# table-valued pragma any connection can compile since SQLite 3.16, well under
-# the 3.30 floor open_db enforces.
-#
-# The marker is a speed bump, not the guarantee: a writer with SQL access can
-# create the same temp table, or drop this trigger outright. The guarantee is on
-# the read path, where a level above PRELIMINARY has to be backed by the signed
-# evidence that earns it (``core._CorroborationIndex``). This trigger keeps a
-# stray write from reaching that check at all.
-#
-# Reconciled onto existing graphs by the same sqlite_master comparison as the
-# laundering trigger, so keep the text a single CREATE statement.
-_PROMOTION_MARKER_TABLE = "mareforma_promotion_open"
-
-_PROMOTION_TRIGGER_NAME = "claims_signed_promotion_backed"
-
-_PROMOTION_TRIGGER_SQL = f"""\
-CREATE TRIGGER {_PROMOTION_TRIGGER_NAME}
-BEFORE UPDATE OF support_level ON claims
-WHEN OLD.signature_bundle IS NOT NULL
-  AND (
-        (OLD.support_level = 'PRELIMINARY' AND NEW.support_level = 'REPLICATED')
-     OR (OLD.support_level = 'REPLICATED' AND NEW.support_level = 'ESTABLISHED')
-  )
-  AND NOT EXISTS (
-        SELECT 1 FROM pragma_table_info('{_PROMOTION_MARKER_TABLE}', 'temp')
-  )
-BEGIN
-    SELECT RAISE(ABORT, 'mareforma:append_only:promotion_unmarked');
 END"""
 
 
@@ -786,9 +728,9 @@ END"""
 # unrunnable. A ``BEFORE UPDATE OF`` list is an event filter, not a reference,
 # and the column stays droppable.
 #
-# So the WHEN clause keys on the same per-connection marker
-# ``claims_signed_promotion_backed`` uses: ``set_project_policy`` opens the
-# window around its upsert, and no other connection has that temp table to find.
+# So the WHEN clause keys on a per-connection marker: ``set_project_policy``
+# opens the window around its upsert, and no other connection has that temp
+# table to find.
 # The marker is a speed bump, not the guarantee (a writer with SQL access can
 # create the same temp table, drop the trigger, or reach the row through
 # INSERT OR REPLACE, which SQLite runs without firing either guard while
@@ -860,7 +802,7 @@ END"""
 # where a definition is written down.
 _AUTHORED_TRIGGERS = (
     (_SIGNED_FIELDS_TRIGGER_NAME, _SIGNED_FIELDS_TRIGGER_SQL),
-    (_PROMOTION_TRIGGER_NAME, _PROMOTION_TRIGGER_SQL),
+    (_VALIDATION_TERMINAL_TRIGGER_NAME, _VALIDATION_TERMINAL_TRIGGER_SQL),
     (_FINDINGS_APPEND_ONLY_TRIGGER_NAME, _FINDINGS_APPEND_ONLY_TRIGGER_SQL),
     (_FINDINGS_NO_DELETE_TRIGGER_NAME, _FINDINGS_NO_DELETE_TRIGGER_SQL),
     (
@@ -923,10 +865,26 @@ _ADDITIVE_TABLES_SQL = """
 -- schema-if-not-exists-hides-constraint-change trap: statements that run only
 -- for a fresh database never reach a graph written by an earlier release).
 CREATE INDEX IF NOT EXISTS idx_claims_read_order ON claims(
-    CASE support_level WHEN 'ESTABLISHED' THEN 3
-         WHEN 'REPLICATED' THEN 2 ELSE 1 END DESC,
     created_at DESC
 );
+
+-- The reputation count groups by the signer named INSIDE the validation
+-- envelope, which is the signed thing, rather than by the unsigned
+-- validator_keyid column beside it. Without an index matching that expression
+-- the count is a full table scan plus a temp b-tree, and it runs on every
+-- enumerating read: measured at 5ms on 100k claims and 52ms on a million,
+-- against 0.03ms and 0.98ms for the indexed column it replaced. The cost
+-- scaled with the whole table while the thing being counted stays, as the
+-- partial index below says, a small minority forever.
+--
+-- Partial on the same predicate the query filters on, so an unvalidated claim
+-- pays nothing on insert and only the rows that carry an envelope are stored.
+-- Here rather than in the fresh-database schema for the reason above it: a
+-- statement that runs only for a fresh database never reaches a graph written
+-- by an earlier release.
+CREATE INDEX IF NOT EXISTS idx_claims_validation_signer ON claims(
+    json_extract(validation_signature, '$.signatures[0].keyid')
+) WHERE validation_signature IS NOT NULL;
 
 -- project_policy: a root-signed, single-row declaration of project-wide
 -- trust policy. rekor_required: the project's findings must be witnessed by
@@ -1494,7 +1452,7 @@ _EXPECTED_TRIGGER_TABLES: "dict[str, str]" = {
 # Explicit column list, avoids SELECT * coupling to schema changes.
 # Source of truth for the column-presence check in open_db().
 _CLAIM_COLUMNS = (
-    "claim_id", "text", "classification", "support_level",
+    "claim_id", "text", "classification",
     "idempotency_key", "validated_by", "validated_at",
     "status", "source_name", "generated_by",
     "supports_json", "contradicts_json",
@@ -1502,8 +1460,8 @@ _CLAIM_COLUMNS = (
     "signature_bundle", "transparency_logged",
     "validation_signature",
     "validator_keyid",
-    # Denormalized asserter keyid from the signature_bundle (REPLICATED
-    # distinctness axis + trust-layer independence count read this column).
+    # Denormalized asserter keyid from the signature_bundle (the trust-layer
+    # independence count reads this column).
     "asserter_keyid",
     "artifact_hash",
     "prev_hash",
@@ -1514,7 +1472,6 @@ _CLAIM_COLUMNS = (
     # Statement v1 content identifier + verdict-derived invalidation.
     "statement_cid", "t_invalid",
     # Convergence-detection retry queue.
-    "convergence_retry_needed",
     # Adapter-specific structured predicate payload (queryable
     # denormalisation of the signed envelope's predicate body).
     "predicate_payload",

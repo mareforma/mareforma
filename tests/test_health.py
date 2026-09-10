@@ -38,22 +38,32 @@ class TestTrafficLight:
         finally:
             conn.close()
         assert report.traffic_light == "yellow"
-        assert "PRELIMINARY" in report.rationale
+        assert "signed" in report.rationale
 
-    def test_green_when_replicated_claim_exists(self, tmp_path: Path) -> None:
-        # Promotion keys on two distinct non-NULL asserter_keyid values over
-        # a shared ESTABLISHED upstream, so each peer is signed with its own
-        # key. Unsigned peers stay PRELIMINARY and never reach REPLICATED.
+    def test_green_when_a_claim_carries_a_signed_validation(
+        self, tmp_path: Path,
+    ) -> None:
+        """What turns the light green, now that no rung does.
+
+        It used to be a claim that reached a rung, which happened on its
+        own when two distinct signers converged. Nothing is promoted, so the
+        light asks the only thing left that a person put their name to.
+        """
         import mareforma
-        from tests._helpers import _bootstrap_key, _two_signers
-        sa, sb = _two_signers(tmp_path)
+        from mareforma import signing as _sig
+        from tests._helpers import _bootstrap_key
+
         key = _bootstrap_key(tmp_path, "root.key")
+        val_key = tmp_path / "val.key"
+        _sig.bootstrap_key(val_key)
+        val_pem = _sig.public_key_to_pem(
+            _sig.load_private_key(val_key).public_key(),
+        )
         with mareforma.open(tmp_path, key_path=key) as g:
-            prior = g.assert_claim("prior", generated_by="seed", seed=True)
-            g.assert_claim("finding A", supports=[prior],
-                           generated_by="agent_A", signer=sa)
-            g.assert_claim("finding B", supports=[prior],
-                           generated_by="agent_B", signer=sb)
+            claim_id = g.assert_claim("a finding", generated_by="agent_A")
+            g.enroll_validator(val_pem, identity="v")
+        with mareforma.open(tmp_path, key_path=val_key) as g:
+            g.validate(claim_id)
 
         conn = _open(tmp_path)
         try:
@@ -61,21 +71,7 @@ class TestTrafficLight:
         finally:
             conn.close()
         assert report.traffic_light == "green"
-        assert report.support_level_breakdown["REPLICATED"] == 2
-
-    def test_green_when_only_replicated_claims_stand(self) -> None:
-        # REPLICATED alone is a green light: the ESTABLISHED term must not be
-        # the only thing carrying the verdict. Built directly because a graph
-        # with REPLICATED and no ESTABLISHED anchor is unreachable through
-        # the API.
-        report = HealthReport(
-            claims_open=1,
-            support_level_breakdown={"REPLICATED": 1},
-            standing_promoted=1,
-        )
-        light, rationale = _compute_traffic_light(report)
-        assert light == "green"
-        assert "replicated" in rationale.lower()
+        assert report.standing_validated == 1
 
     def test_not_green_when_the_promoted_claim_is_retracted(
         self, tmp_path: Path,
@@ -86,7 +82,7 @@ class TestTrafficLight:
         from tests._helpers import _bootstrap_key
         key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=key) as g:
-            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            prior = g.assert_claim("prior", generated_by="seed")
             g.update_claim(prior, status="retracted")
 
         conn = _open(tmp_path)
@@ -96,8 +92,8 @@ class TestTrafficLight:
             conn.close()
         assert report.traffic_light != "green"
         assert "retracted" in report.rationale
-        # The census stays the full per-level count, it is a public field.
-        assert report.support_level_breakdown["ESTABLISHED"] == 1
+        # A retracted claim is not standing, whatever it carries.
+        assert report.standing_validated == 0
 
     def test_not_green_when_the_promoted_claim_is_invalidated(
         self, tmp_path: Path,
@@ -110,7 +106,7 @@ class TestTrafficLight:
         val_key = _bootstrap_key(tmp_path, "val.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             g.enroll_validator(_pem_of(val_key), identity="v")
-            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            prior = g.assert_claim("prior", generated_by="seed")
             counter = g.assert_claim("counter", generated_by="lab_w", signer=sb)
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.record_contradiction_verdict(
@@ -129,10 +125,10 @@ class TestTrafficLight:
     def test_not_green_when_a_promotion_does_not_reverify(
         self, tmp_path: Path,
     ) -> None:
-        # support_level is not a signed field: a direct writer can tamper a
-        # promoted row's envelope while the census still counts it as standing.
-        # The census counts levels as recorded; the separate re-verification count
-        # catches the tampered promotion, and the light cannot read green over it.
+        # The census counts a row as standing when it carries a validation
+        # envelope; the separate re-verification count is what catches an
+        # envelope that no longer verifies, and the light cannot read green
+        # over it.
         import mareforma
         from tests._helpers import _bootstrap_key, _pem_of, _two_signers
         sa, sb = _two_signers(tmp_path)
@@ -140,17 +136,20 @@ class TestTrafficLight:
         val_key = _bootstrap_key(tmp_path, "val.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             g.enroll_validator(_pem_of(val_key), identity="v")
-            up = g.assert_claim("anchor", generated_by="seed", seed=True)
+            up = g.assert_claim("anchor", generated_by="seed")
             rep = g.assert_claim("A", supports=[up], generated_by="a", signer=sa)
             g.assert_claim("B", supports=[up], generated_by="b", signer=sb)
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.validate(rep)
-            assert g.get_claim(rep)["support_level"] == "ESTABLISHED"
 
-        # Forge the promotion: corrupt the validation envelope directly in sqlite,
-        # the way a process with DB write access would.
+        # Corrupt the validation envelope directly in sqlite, the way a process
+        # with DB write access would. The trigger that makes a validation
+        # terminal refuses this UPDATE, and the same writer can drop it, so the
+        # tamper drops it first: what is under test here is the layer below,
+        # the re-verification the health report runs for itself.
         conn = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
         try:
+            conn.execute("DROP TRIGGER IF EXISTS claims_validation_is_terminal")
             conn.execute(
                 "UPDATE claims SET validation_signature = ? WHERE claim_id = ?",
                 ('{"payloadType":"forged","payload":"x","signatures":[]}', rep),
@@ -164,10 +163,8 @@ class TestTrafficLight:
             report = compute_health(conn)
         finally:
             conn.close()
-        # The census still shows the ESTABLISHED rows (the seed anchor plus the
-        # promoted claim), but the tampered promotion no longer re-verifies, so the
-        # light is barred from green and the failed count is surfaced.
-        assert report.support_level_breakdown["ESTABLISHED"] == 2
+        # The tampered row no longer re-verifies, so the light is barred from
+        # green and the failed count is surfaced.
         assert report.failed_verification == 1
         assert report.traffic_light != "green"
         assert "re-verify" in report.rationale
@@ -202,7 +199,7 @@ class TestCounts:
         val_key = _bootstrap_key(tmp_path, "val.key")
         with mareforma.open(tmp_path, key_path=root_key) as g:
             g.enroll_validator(_pem_of(val_key), identity="v")
-            older = g.assert_claim("older", generated_by="seed", seed=True)
+            older = g.assert_claim("older", generated_by="seed")
             counter = g.assert_claim("counter", generated_by="lab_w", signer=sb)
         with mareforma.open(tmp_path, key_path=val_key) as g:
             g.record_contradiction_verdict(
@@ -243,7 +240,7 @@ class TestCounts:
         sa, sb = _two_signers(tmp_path)
         key = _bootstrap_key(tmp_path, "root.key")
         with mareforma.open(tmp_path, key_path=key) as g:
-            prior = g.assert_claim("prior", generated_by="seed", seed=True)
+            prior = g.assert_claim("prior", generated_by="seed")
             g.assert_claim("finding A", supports=[prior],
                            generated_by="agent_A", signer=sa)
             g.assert_claim("finding B", supports=[prior],
@@ -263,58 +260,6 @@ class TestCounts:
             conn.close()
         assert report == baseline
         assert (report.claims_open, report.claims_resolved) == (3, 1)
-        assert report.support_level_breakdown == {
-            "ESTABLISHED": 1, "REPLICATED": 2, "PRELIMINARY": 1,
-        }
-        # The ESTABLISHED seed stands alongside its two REPLICATED peers.
-        assert report.standing_promoted == 3
-
-    def test_support_level_breakdown(self, tmp_path: Path) -> None:
-        conn = _open(tmp_path)
-        try:
-            add_claim(conn, tmp_path, "Claim 1")
-            add_claim(conn, tmp_path, "Claim 2")
-            report = compute_health(conn)
-        finally:
-            conn.close()
-        assert report.support_level_breakdown.get("PRELIMINARY", 0) == 2
-
-    def test_convergence_retry_pending_is_zero_on_a_clean_graph(
-        self, tmp_path: Path,
-    ) -> None:
-        conn = _open(tmp_path)
-        try:
-            add_claim(conn, tmp_path, "Claim 1")
-            report = compute_health(conn)
-        finally:
-            conn.close()
-        assert report.convergence_retry_pending == 0
-
-    def test_convergence_retry_pending_surfaces_flagged_claims(
-        self, tmp_path: Path,
-    ) -> None:
-        # A swallowed promotion check flags the claim (the common cause is a
-        # project one writer has upgraded: the older release's promotion trips
-        # the newer guard and is left for retry). The flag is an operational
-        # column, not signed material, so a direct write stands in for it here.
-        conn = _open(tmp_path)
-        try:
-            cid = add_claim(conn, tmp_path, "Stuck claim")
-            conn.execute(
-                "UPDATE claims SET convergence_retry_needed = 1 WHERE claim_id = ?",
-                (cid,),
-            )
-            conn.commit()
-            report = compute_health(conn)
-        finally:
-            conn.close()
-        assert report.convergence_retry_pending == 1
-
-
-# ---------------------------------------------------------------------------
-# Never-raises contract
-# ---------------------------------------------------------------------------
-
 
 class TestNeverRaises:
     def test_empty_project_no_error(self, tmp_path: Path) -> None:
@@ -420,62 +365,6 @@ def test_a_policy_read_that_fails_is_not_reported_as_no_policy_stall(tmp_path):
     assert report.traffic_light == "error"
     assert "could not be read" in report.rationale
     assert report.policy_unverified is False  # unknown, and the light says so
-
-
-def test_claim_show_never_prints_a_support_level_without_its_verified_state(
-    tmp_path,
-):
-    """`claim show` is the command an auditor runs on the claim they suspect.
-
-    `claim list` marks a row whose signature no longer re-verifies UNVERIFIED;
-    `claim show` printed `support_level: REPLICATED` and never mentioned it, so
-    the more detailed view said less about the thing that matters.
-
-    Driven through the command, not through its source: a test that greps
-    `inspect.getsource()` for the word passes on a rename and passes on code
-    that keeps the word and stops printing it.
-    """
-    import json as _json
-
-    from click.testing import CliRunner
-
-    from mareforma.cli import cli
-
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        import mareforma
-        from mareforma import signing
-
-        key = Path("auditor.key")
-        signing.bootstrap_key(key)
-        with mareforma.open(".", key_path=key) as graph:
-            claim_id = graph.assert_claim("a finding under suspicion",
-                                          generated_by="x")
-            # The tamper the read path is built to catch: the row keeps its
-            # level and loses the signature that backed it. The promotion guard
-            # refuses this write, which is the guard working; dropping it is the
-            # precondition, and what is under test is what `claim show` prints
-            # once such a row exists.
-            for trigger in ("claims_signed_promotion_backed",
-                            "claims_signed_fields_no_laundering",
-                            "claims_update_state_check"):
-                graph._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            graph._conn.execute(
-                "UPDATE claims SET support_level = 'REPLICATED', "
-                "signature_bundle = NULL WHERE claim_id = ?", (claim_id,),
-            )
-            graph._conn.commit()
-        shown = runner.invoke(cli, ["claim", "show", claim_id])
-        listed = runner.invoke(cli, ["claim", "list"])
-
-    assert shown.exit_code == 0, shown.output
-    assert "REPLICATED" in shown.output
-    assert "UNVERIFIED" in shown.output, (
-        "claim show printed a support level with nothing beside it saying the "
-        "signature no longer backs it"
-    )
-    # And the two surfaces agree about the same row.
-    assert "UNVERIFIED" in listed.output
 
 
 def test_every_deprecation_warning_goes_through_the_one_emitter():

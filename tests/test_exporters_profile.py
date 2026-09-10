@@ -35,7 +35,7 @@ def _seed(tmp_path: Path) -> tuple[str, str]:
     key_path = tmp_path / "asserter.key"
     _signing.save_private_key(_signing.generate_keypair(), key_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
-        a = graph.assert_claim("upstream finding", generated_by="lab-A", seed=True)
+        a = graph.assert_claim("upstream finding", generated_by="lab-A")
         b = graph.assert_claim(
             "downstream conclusion", supports=[a], generated_by="lab-B"
         )

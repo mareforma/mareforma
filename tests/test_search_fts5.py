@@ -104,34 +104,10 @@ class TestSearchWildcardRejection:
 
 
 # ---------------------------------------------------------------------------
-# Filter composition (min_support, classification, include_unverified)
+# Filter composition (classification, include_unverified)
 # ---------------------------------------------------------------------------
 
 class TestSearchFilters:
-    def test_min_support_filter(self, tmp_path: Path) -> None:
-        key = _bootstrap_key(tmp_path)
-        sa, sb = _two_signers(tmp_path)
-        with mareforma.open(tmp_path, key_path=key) as g:
-            seed = g.assert_claim(
-                "dopamine reference work",
-                generated_by="seed", seed=True,
-            )
-            g.assert_claim(
-                "dopamine modulates striatum",
-                supports=[seed], generated_by="A", signer=sa,
-            )
-            g.assert_claim(
-                "dopamine modulates striatum",
-                supports=[seed], generated_by="B", signer=sb,
-            )
-            # Now we have 1 ESTABLISHED + 2 REPLICATED with 'dopamine'.
-            replicated = g.search("dopamine", min_support="REPLICATED")
-            established = g.search("dopamine", min_support="ESTABLISHED")
-        # min_support=REPLICATED includes REPLICATED + ESTABLISHED.
-        assert len(replicated) == 3
-        # min_support=ESTABLISHED is just the seed.
-        assert len(established) == 1
-
     def test_classification_filter(self, tmp_path: Path) -> None:
         key = _bootstrap_key(tmp_path)
         with mareforma.open(tmp_path, key_path=key) as g:
@@ -147,20 +123,12 @@ class TestSearchFilters:
         assert len(results) == 1
         assert results[0]["classification"] == "ANALYTICAL"
 
-    def test_default_excludes_unverified_preliminary(
-        self, tmp_path: Path,
-    ) -> None:
-        with mareforma.open(tmp_path) as g:  # unsigned
-            g.assert_claim("alpha unverified")
-            results = g.search("alpha")
-        assert results == []
-
     def test_include_unverified_true_surfaces_unsigned(
         self, tmp_path: Path,
     ) -> None:
         with mareforma.open(tmp_path) as g:
             g.assert_claim("alpha unverified")
-            results = g.search("alpha", include_unverified=True)
+            results = g.search("alpha")
         assert len(results) == 1
 
 
@@ -187,10 +155,10 @@ class TestFTSIndexSync:
         from mareforma import db as _db
         with mareforma.open(tmp_path) as g:
             cid = g.assert_claim("original text")
-            assert len(g.search("original", include_unverified=True)) == 1
+            assert len(g.search("original")) == 1
             _db.update_claim(g._conn, g._root, cid, text="revised body")
-            assert g.search("original", include_unverified=True) == []
-            assert len(g.search("revised", include_unverified=True)) == 1
+            assert g.search("original") == []
+            assert len(g.search("revised")) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +178,7 @@ class TestSearchReputationProjection:
         assert "validator_reputation" in results[0]
         assert "generator_enrolled" in results[0]
         assert results[0]["generator_enrolled"] is True
-        # Not yet ESTABLISHED, reputation is 0.
+        # Nobody has signed off yet, so reputation is 0.
         assert results[0]["validator_reputation"] == 0
 
 

@@ -217,45 +217,6 @@ def test_asserting_inside_open_scope_is_refused(tmp_path):
 
 # -- promotion gate ----------------------------------------------------------
 
-def _converge_on_anchor(tmp_path, subject_grounding):
-    """Return the support level of a claim carrying *subject_grounding*.
-
-    The fixture is eligible to promote by construction: an ESTABLISHED anchor,
-    a GROUNDED peer from a distinct signer citing it, and the claim under test
-    citing the same anchor. So the only thing that can hold the level down is
-    the grounding gate on the convergence path. The peer is GROUNDED on purpose:
-    a non-GROUNDED peer is refused by the candidate SELECT's own clause, which
-    would mask whether the gate on the new claim runs at all.
-    """
-    sa, sb = _two_signers(tmp_path)
-    with open_graph(tmp_path) as g:
-        anchor = g.assert_claim("established anchor", seed=True)
-        g.assert_claim(
-            "peer from a distinct signer", supports=[anchor],
-            generated_by="lab_b", signer=sb,
-            observed_grounding=_grounded(tmp_path).to_signed_dict(),
-        )
-        subject = g.assert_claim(
-            "claim under test", supports=[anchor], generated_by="lab_a",
-            signer=sa, observed_grounding=subject_grounding.to_signed_dict(),
-        )
-        return g.get_claim(subject)["support_level"]
-
-
-def test_grounded_finding_promotes_on_convergence(tmp_path):
-    # Positive control: the fixture really is eligible, so the PRELIMINARY
-    # results below are the gate talking and not a precondition that never held.
-    assert _converge_on_anchor(tmp_path, _grounded(tmp_path)) == "REPLICATED"
-
-
-@pytest.mark.parametrize("verdict", [OG.UNGROUNDED, OG.OPAQUE])
-def test_non_grounded_finding_does_not_promote(tmp_path, verdict):
-    # A finding whose execution shows it is not grounded must never ride into
-    # REPLICATED, even when a distinct-signer peer would otherwise converge.
-    grounding = GroundingVerdict(
-        verdict, "no cited read", cited_sources=(_cited_path(tmp_path),),
-    )
-    assert _converge_on_anchor(tmp_path, grounding) == "PRELIMINARY"
 
 
 def test_idempotent_replay_reports_the_stored_verdict(tmp_path):
@@ -311,43 +272,6 @@ def test_idempotent_replay_of_disjoint_verdict_fires_no_event_and_no_raise(tmp_p
     assert "grounding_citation_mismatch" not in ops
 
 
-def test_grounding_promotes_helper():
-    from mareforma.db import _observed_grounding_promotes
-
-    assert _observed_grounding_promotes(None) is True  # pre-observer: unaffected
-    assert _observed_grounding_promotes('{"grounding":"GROUNDED"}') is True
-    assert _observed_grounding_promotes('{"grounding":"UNGROUNDED"}') is False
-    assert _observed_grounding_promotes('{"grounding":"OPAQUE"}') is False
-    assert _observed_grounding_promotes("not json") is False  # fail-closed
-    assert _observed_grounding_promotes("") is False  # matches the SQL gate
-
-
-def test_sql_promotion_guard_fails_closed_on_malformed_column():
-    # The promotion query's grounding guard must fail closed on a malformed or
-    # empty observed_grounding column, matching the Python helper, NOT raise.
-    # SQLite does not short-circuit `json_valid(x) AND json_extract(x, ...)`, so
-    # json_extract is still evaluated and throws "malformed JSON"; the guard
-    # must use CASE. A single corrupt row would otherwise abort the whole
-    # convergence scan. Exercised as a WHERE filter, the way the real query uses
-    # it: only NULL (pre-observer) and GROUNDED rows survive.
-    import sqlite3
-
-    guard = (
-        "col IS NULL OR ("
-        "CASE WHEN json_valid(col) "
-        "THEN json_extract(col, '$.grounding') ELSE NULL END) = 'GROUNDED'"
-    )
-    con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE t(id INTEGER, col TEXT)")
-    con.executemany(
-        "INSERT INTO t(id, col) VALUES (?, ?)",
-        [(1, None), (2, ""), (3, "not json"),
-         (4, '{"grounding":"GROUNDED"}'), (5, '{"grounding":"UNGROUNDED"}')],
-    )
-    survivors = [r[0] for r in con.execute(f"SELECT id FROM t WHERE {guard}")]
-    con.close()
-    # NULL (pre-observer) and GROUNDED promote; '', malformed, UNGROUNDED excluded.
-    assert survivors == [1, 4]
 
 
 # -- verdict-citation binding -----------------------------------------------
@@ -731,7 +655,7 @@ def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
     key_b = _bootstrap_validator_key(tmp_path)
     verdict = _grounded(tmp_path).to_signed_dict()
     with open_graph(tmp_path) as g:
-        anchor = g.assert_claim("established anchor", seed=True)
+        anchor = g.assert_claim("established anchor")
         cid = g.assert_claim(
             "converged", supports=[anchor], observed_grounding=verdict,
         )
@@ -740,7 +664,6 @@ def test_forged_verdict_is_unverified_on_the_replicated_read_path(tmp_path):
             "converged", supports=[anchor], observed_grounding=verdict,
         )
     with open_graph(tmp_path) as g:
-        assert g.get_claim(cid)["support_level"] == "REPLICATED"
         g._conn.execute(
             "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
         )

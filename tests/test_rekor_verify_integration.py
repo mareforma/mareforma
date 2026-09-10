@@ -509,7 +509,7 @@ class TestOptInAndOptOut:
             cid = graph.assert_claim("local only", classification="ANALYTICAL")
             claim = graph.get_claim(cid)
         # No Rekor wiring → transparency_logged defaults to 1
-        # (REPLICATED gating skipped for non-Rekor signed claims).
+        # (the log check is skipped for non-Rekor signed claims).
         assert claim["transparency_logged"] == 1
         assert not pin_path.exists()
         # No HTTP requests issued.

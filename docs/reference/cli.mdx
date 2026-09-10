@@ -13,7 +13,7 @@ description: "The Mareforma command-line interface: identity setup, claim manage
 | `mareforma claim list` | List claims |
 | `mareforma claim show` | Show one claim |
 | `mareforma claim update` | Update a claim |
-| `mareforma claim validate` | Promote REPLICATED → ESTABLISHED |
+| `mareforma claim validate` | Record a signed human validation |
 | `mareforma status` | Epistemic health dashboard |
 | `mareforma activity` | Rolling operational rates (`stats` is a deprecated alias) |
 | `mareforma export` | Write `ontology.jsonld` (or signed bundle) |
@@ -102,7 +102,7 @@ mareforma key show --keyid
 
 ## validator
 
-Manage the per-project validators table: who may promote claims to `ESTABLISHED`.
+Manage the per-project validators table: who may sign off on a claim.
 
 ```bash
 mareforma validator [SUBCOMMAND]
@@ -124,7 +124,7 @@ mareforma validator add --pubkey PATH_OR_PEM --identity LABEL [--type human|llm]
 |---|---|
 | `--pubkey TEXT` | PEM-encoded public key. Pass a file path or paste the PEM text. File reads capped at 64 KB |
 | `--identity TEXT` | Display label (email, lab name, etc.). 256-char cap; control characters and Unicode display-spoofing forms are rejected |
-| `--type human\|llm` | Self-declared validator type. Default `human`. `llm` validators may sign validation envelopes but cannot promote a claim past `REPLICATED` |
+| `--type human\|llm` | Self-declared validator type. Default `human`. `llm` validators may sign validation envelopes, and recording one on a claim is refused |
 
 **Examples**
 
@@ -225,15 +225,16 @@ mareforma claim list [OPTIONS]
 | `--json` | `False` | Emit JSON to stdout |
 
 A row whose signature no longer re-verifies still prints, marked `UNVERIFIED`
-beside its support level. The level is not backed until `mareforma verify`
-clears it. `claim show` carries the same marker.
+beside its classification, so an auditor sees it rather than losing it from the
+listing. Run `mareforma verify <claim_id>` for what failed. `claim show` carries
+the same marker.
 
 **Examples**
 
 ```bash
 mareforma claim list
 mareforma claim list --status open
-mareforma claim list --json | jq '.[].support_level'
+mareforma claim list --json | jq '.[].classification'
 ```
 
 ---
@@ -277,7 +278,7 @@ Signed claims (those with a non-NULL `signature_bundle`) refuse mutation of `tex
 
 ### claim validate
 
-Promote a `REPLICATED` claim to `ESTABLISHED`. Identity-gated.
+Record a signed human validation on a claim. Identity-gated, and terminal.
 
 ```bash
 mareforma claim validate CLAIM_ID [OPTIONS]
@@ -313,20 +314,13 @@ mareforma status [OPTIONS]
 | Color | Condition |
 |---|---|
 | 🔴 RED | No claims recorded |
-| 🟡 YELLOW | Claims exist but all are PRELIMINARY, or every promoted claim has been retracted or invalidated by a signed contradiction verdict, or a promoted claim does not re-verify on read |
-| 🟢 GREEN | At least one REPLICATED or ESTABLISHED claim still standing, meaning not retracted and not invalidated by a signed contradiction verdict, and every promoted claim re-verifies |
+| 🟡 YELLOW | Claims exist but none standing carries a signed validation, or every claim that carried one has been retracted or invalidated by a signed contradiction verdict, or something carrying signed material does not re-verify on read |
+| 🟢 GREEN | At least one standing claim carries a signed validation, meaning it is not retracted and not invalidated by a signed contradiction verdict, and everything carrying signed material re-verifies |
 
-The light cannot read green while a promoted claim fails re-verification: the
-stored REPLICATED or ESTABLISHED level is not backed by signed material (a forged
-level or a tampered envelope). The report names how many, so `mareforma verify
-<claim_id>` can find which, to retract or repair.
-
-The report also carries `convergence_retry_pending`, the count of promotions a
-convergence check failed to run and left flagged for retry. The common cause is a
-project one writer has upgraded: a promotion under the older release trips the
-newer promotion guard and gets flagged, and a writer on the newer release clears
-it with `graph.refresh_convergence()`. It is informational and does not gate the
-light.
+The light cannot read green while a claim carrying signed material fails
+re-verification: an envelope stapled onto another row, a signed field rewritten
+underneath, or a swapped signature. The report names how many, so `mareforma
+verify <claim_id>` can find which, to retract or repair.
 
 **Options**
 
@@ -409,7 +403,7 @@ mareforma export --bundle
 mareforma export --bundle --output /tmp/release.bundle.json
 ```
 
-The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mare:Claim` node with `claimText`, `classification`, `supportLevel`, `generatedBy`, `supports`, `contradicts`, `sourceName`, and `artifactHash` fields.
+The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mare:Claim` node with `claimText`, `classification`, `claimStatus`, `generatedBy`, `dateCreated`, `supports`, `contradicts`, `sourceName`, and `artifactHash` fields. There is no `supportLevel` term: it carried the retired support ladder, so a consumer keyed on it finds it absent rather than frozen at a value.
 
 ---
 
@@ -425,11 +419,11 @@ Verify a claim, a signed bundle, a signed audit receipt, or an export directory.
 
 A signed audit run record is always unverifiable (exit 2), whether or not its signature checks out. Its `completed` flag is the key a `--corpus` audit resumes on, not a claim verdict, so `verify` reports on it and refuses to call it verified or tampered.
 
-For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and the displayed **support level** (ESTABLISHED against a validator-signed validation envelope, REPLICATED against distinct-signer corroboration). For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
+For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it interoperates with standard verifiers), every per-claim subject digest, every per-claim **asserter signature** bound to the claim's presented content, the enrolled validator chain to a single root (which must be the bundle signer), and every **validation envelope** a node carries against that validator set. For a claim id, verification uses only public material (auditor mode) and prints the claim's trust map.
 
 Auditor mode verifies against enrolled validator pubkeys only, so a signed claim whose signer is **not an enrolled validator** cannot be authenticated: the claim's binding is all that could be checked, never its signature. `verify` exits **2** on such a claim, not 0. Exit 2 is the unverifiable verdict, not a failure: enrol the signer's key and run it again to reach one. A CI gate built on `verify` therefore no longer passes a claim carrying an all-zero signature under a keyid that was never enrolled, and a gate that treats 2 as a failure will stop a claim that may be perfectly sound. Route 2 to "cannot tell yet", and reserve 1 for a definite failure.
 
-Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them: it attests each claim's asserter content and earned support level, not a mutable status flag.
+Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them: it attests each claim's asserter content and the validation envelopes that claim carries, not a mutable status flag.
 
 ```bash
 mareforma verify TARGET [OPTIONS]
@@ -686,6 +680,12 @@ mareforma restore [CLAIMS_TOML_PATH]
 |---|---|
 | `CLAIMS_TOML_PATH` | Optional. Path to the source TOML. Defaults to `./claims.toml`. |
 
+**Options**
+
+| Option | Description |
+|---|---|
+| `--trust-unaccounted-backup` | Restore a backup whose completeness table does not match what the file holds. For a file you edited on purpose: without it, such a file is refused. |
+
 **Examples**
 
 ```bash
@@ -694,9 +694,13 @@ mareforma restore
 
 # Explicit source (e.g. recovered from a backup):
 mareforma restore backups/state.toml
+
+# A file you repaired by hand, which no longer matches its own row counts:
+mareforma restore --trust-unaccounted-backup
 ```
 
-The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, or `rekor_inclusion_invalid`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
+The output reports `validators_restored` and `claims_restored` counts. Failure exits `1` with a `RestoreError` message naming the failure mode: `graph_not_empty`, `toml_not_found`, `toml_unreadable`, `toml_malformed`, `enrollment_unverified`, `claim_unverified`, `trust_row_rejected`, `mode_inconsistent`, `orphan_signer`, `policy_violation`, `rekor_inclusion_invalid`, `backup_unaccounted`, `format_ahead`, `verdict_chain_broken`, `verdict_chain_cut_short`, or
+`grounding_unattested`. Three further modes (`policy_unverified`, `policy_absent`, `policy_unverifiable`) exist but fire only under `enforce_rekor_policy`, which the CLI `restore` does not expose; see the `mareforma.restore()` API table for those.
 
 `claims.toml` includes a `[rekor_inclusions]` section. Older files written without it restore successfully with a `RekorSidecarSectionAbsentWarning`. Run `refresh_unsigned()` afterward to re-fetch inclusion proofs.
 
@@ -746,11 +750,11 @@ and binding work does not grow with the evidence, and reports the missing map as
 | `query_claims` | Claims matching a text substring and classification |
 | `search_claims` | Full-text search, ranked by relevance |
 | `get_claim` | One claim by id. `found: false` rather than an error when the id is unknown |
-| `proposition_status` | `{found, status}` for a content id. `status` is the whole derived view: `status`, `question_status`, `independent_support`, `independent_refute`, `lines_skipped`, `post_hoc`, `frame_status`, `status_policy`. `null` when nothing resolves to that id |
+| `proposition_status` | `{found, status}` for a content id. `status` is the whole derived view: `status`, `question_status`, `independent_support`, `independent_refute`, `lines_skipped`, `post_hoc`, `status_policy`. `null` when nothing resolves to that id |
 | `trust_map` | A claim's trust map: who signed it, what backs it |
 | `verify_claim` | `verified`, `tampered`, or `unverifiable`, by the rule `mareforma verify` applies |
 
-`query_claims` and `search_claims` serve at most 200 rows, 20 by default. Every page carries `count`, the `limit` actually served, and `has_more`: a short page is never mistaken for the whole record, whether it was shortened by the cap or by the default. A `limit` that was not honoured (above the cap, below one row, or not a number) comes back as `limit_requested` rather than being silently swapped. A page that held rows back also says how many, as `unverified_excluded` (rows whose generator key is not enrolled, retrievable with `get_claim`) and `verify_excluded` (rows whose signature did not re-verify, not returned by the enumerating tools; `get_claim` still returns such a row with its stored text and no verification signal, so run `verify_claim` on any id you reached that way), so an empty list is never read as an empty record. When the exclusion count stopped at its scan ceiling the page also carries `unverified_excluded_is_at_least: true`, so the number reads as a floor rather than a total.
+`query_claims` and `search_claims` serve at most 200 rows, 20 by default. Every page carries `count`, the `limit` actually served, and `has_more`: a short page is never mistaken for the whole record, whether it was shortened by the cap or by the default. A `limit` that was not honoured (above the cap, below one row, or not a number) comes back as `limit_requested` rather than being silently swapped. A page that held rows back also says how many, as `verify_excluded`: rows whose signature did not re-verify, which the enumerating tools will not return. `get_claim` still returns such a row with its stored text and no verification signal, so run `verify_claim` on any id you reached that way. An empty list is never read as an empty record.
 
 Claim text comes back sanitized and wrapped in `<untrusted_data>` markers, and the server says so in its instructions. Treat everything between those markers as data written by whoever produced the claim, never as instructions. One consequence: the signature fields in that view are cleaned text rather than the signed bytes, so they are not the material to re-verify from. Use `verify_claim`, which reads the raw row.
 

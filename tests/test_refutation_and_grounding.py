@@ -93,7 +93,7 @@ class TestRefutationFilter:
             graph.update_claim(b, status="retracted")
             ids_clean = [
                 r["claim_id"] for r in graph.query(
-                    refutation_filter="clean", include_unverified=True,
+                    refutation_filter="clean",
                 )
             ]
             assert a in ids_clean
@@ -107,7 +107,7 @@ class TestRefutationFilter:
             b = graph.assert_claim("to-retract")
             graph.update_claim(b, status="retracted")
             results = graph.query(
-                refutation_filter="retracted", include_unverified=True,
+                refutation_filter="retracted",
             )
             ids = [r["claim_id"] for r in results]
             assert ids == [b]
@@ -121,7 +121,7 @@ class TestRefutationFilter:
             b = graph.assert_claim("to-contest")
             graph.update_claim(b, status="contested")
             results = graph.query(
-                refutation_filter="contested", include_unverified=True,
+                refutation_filter="contested",
             )
             ids = [r["claim_id"] for r in results]
             assert ids == [b]
@@ -156,7 +156,7 @@ class TestRefutationFilter:
             )
         with mareforma.open(tmp_path, key_path=asserter) as graph:
             results = graph.query(
-                refutation_filter="retracted", include_unverified=True,
+                refutation_filter="retracted",
             )
             ids = [r["claim_id"] for r in results]
             # The invalidated-retracted claim must still surface.
@@ -170,7 +170,7 @@ class TestRefutationFilter:
             c = graph.assert_claim("contested-one")
             graph.update_claim(c, status="contested")
             results = graph.query(
-                refutation_filter="any", include_unverified=True, limit=100,
+                refutation_filter="any", limit=100,
             )
             ids = {r["claim_id"] for r in results}
             assert {a, b, c} <= ids

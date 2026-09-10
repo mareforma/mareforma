@@ -854,6 +854,7 @@ class TestACleanListingIsClean:
         health record, and it inflates a count that answers a different
         question: how much of the list is missing."""
         excluded: list = []
+        served: list = []
         key, older, _ = _contradicted_pair(tmp_path)
         _raw(tmp_path, ("UPDATE claims SET t_invalid = NULL WHERE claim_id = ?",
                         (older,)))
@@ -861,10 +862,13 @@ class TestACleanListingIsClean:
         try:
             from mareforma.db.core import query_claims
 
-            query_claims(conn, limit=20,
-                         on_unverified_excluded=lambda n, s=False: excluded.append(n))
+            rows = query_claims(conn, limit=20,
+                                on_verify_excluded=lambda n: excluded.append(n),
+                                on_contested=lambda n: served.append(n))
         finally:
             conn.close()
+        assert older in {r["claim_id"] for r in rows}
+        assert sum(served) >= 1, "the fixture served no contested row"
         assert excluded == []
 
 

@@ -766,25 +766,24 @@ class TestIdentityUnicodeSpoofing:
 
 class TestValidateIdentityCheck:
     def _setup_replicated(self, graph, tmp_path: Path) -> str:
-        """Helper: assert seed + 2 distinct-signer agents -> REPLICATED.
+        """Helper: assert seed + 2 distinct-signer agents.
 
-        Under the v0.3.7 model REPLICATED keys on two distinct, non-NULL
+        A reader counts two lines only on two distinct, non-NULL
         asserter_keyid values (the per-claim signer), so each converging
         peer must be signed by its own key.
         """
         sa, sb = _two_signers(tmp_path)
-        seed = graph.assert_claim("seed", generated_by="seed", seed=True)
+        seed = graph.assert_claim("seed", generated_by="seed")
         id_a = graph.assert_claim(
             "finding", supports=[seed], generated_by="agent-A", signer=sa,
         )
         graph.assert_claim(
             "finding", supports=[seed], generated_by="agent-B", signer=sb,
         )
-        assert graph.get_claim(id_a)["support_level"] == "REPLICATED"
         return id_a
 
     def test_validate_requires_loaded_signer(self, tmp_path: Path) -> None:
-        # Bootstrap a key, build the REPLICATED chain via the seeded-
+        # Bootstrap a key, build the converged chain via the seeded-
         # upstream path. Then re-open without a key and confirm
         # validate() refuses on the loaded-signer gate.
         key_path = _bootstrap_key(tmp_path)
@@ -820,7 +819,7 @@ class TestValidateIdentityCheck:
                 graph.validate(id_a)
 
     def test_validate_persists_signed_envelope(self, tmp_path: Path) -> None:
-        # Generator key signs the REPLICATED claim; a separately-enrolled
+        # Generator key signs the converged claim; a separately-enrolled
         # validator key is the only one allowed to promote it. Same-key
         # validation is refused by the graph as self-promotion.
         root_key_path = _bootstrap_key(tmp_path, "root.key")
@@ -839,7 +838,6 @@ class TestValidateIdentityCheck:
             graph.validate(id_a, validated_by="display@lab.example")
             claim = graph.get_claim(id_a)
 
-        assert claim["support_level"] == "ESTABLISHED"
         assert claim["validated_by"] == "display@lab.example"
         assert claim["validation_signature"] is not None
 
@@ -874,7 +872,7 @@ class TestValidationTimestampParity:
 
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
-            upstream = graph.assert_claim("u", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("u", generated_by="seed")
             id_a = graph.assert_claim(
                 "f", supports=[upstream], generated_by="A", signer=sa,
             )
@@ -1240,7 +1238,7 @@ class TestCLIValidateProducesSignedEnvelope:
         graph.validate(), which signs the validation event."""
         monkeypatch.chdir(tmp_path)
 
-        # Root key signs the REPLICATED claim. Validator key (which lands
+        # Root key signs the converged claim. Validator key (which lands
         # in XDG so the CLI picks it up) is enrolled separately and is
         # the one allowed to promote, same-key validation is refused by
         # the graph as self-promotion.
@@ -1250,11 +1248,11 @@ class TestCLIValidateProducesSignedEnvelope:
             _signing.load_private_key(validator_key_path).public_key(),
         )
 
-        # Build the REPLICATED claim using the root key, then enroll the
+        # Build the converged claim using the root key, then enroll the
         # validator key under root.
         sa, sb = _two_signers(tmp_path)
         with mareforma.open(tmp_path, key_path=root_key_path) as graph:
-            upstream = graph.assert_claim("u", generated_by="seed", seed=True)
+            upstream = graph.assert_claim("u", generated_by="seed")
             rep_id = graph.assert_claim(
                 "f", supports=[upstream], generated_by="A", signer=sa,
             )

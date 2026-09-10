@@ -18,9 +18,8 @@ Trust vocabulary
   Read trust off the two derived axes: ``Status`` per content_id is the state
   of the answer, ``FrameStatus`` / ``question_status`` per frame_id is the
   state of the question, both computed on every read from the graph. The
-  stored ``support_level`` column (PRELIMINARY -> REPLICATED -> ESTABLISHED)
-  is the legacy promotion ladder; its public labels are deprecated for v0.4.0,
-  though ``query(min_support=...)`` still filters on them for this release.
+  promotion ladder that used to sit beside them is gone: nothing public reads
+  or filters on a support level any more.
 
 Flow
 ----
@@ -28,13 +27,12 @@ Flow
     ├─ idempotency check (if key provided)
     ├─ validate classification
     ├─ INSERT via db.add_claim()
-    └─ convergence check fires inside add_claim() (writes support_level)
 
   query()
-    └─ SELECT via db.query_claims() with text/support/classification filters
+    └─ SELECT via db.query_claims() with text/classification filters
 
   validate()
-    └─ UPDATE via db.validate_claim(): the human-witness promotion gate
+    └─ UPDATE via db.validate_claim(): the human-witness attestation
 """
 
 from __future__ import annotations
@@ -80,58 +78,6 @@ _LLM_NAMED_FIELDS = frozenset(_LLM_WRAP_FIELDS + _LLM_SANITIZE_FIELDS)
 # path that resolves an absent generated_by uses this one name so a write and
 # the checks that read it back cannot drift apart.
 DEFAULT_RUN_TOKEN = "agent"
-
-_MIN_SUPPORT_DEPRECATION = (
-    "query(min_support=...) is deprecated: the support ladder is retired and "
-    "the whole support_level column goes in v0.4.0, filter and all. Read the "
-    "trust map's independence axis, or proposition_status(), for how much "
-    "distinct backing a finding actually has."
-)
-
-
-def _caller_stacklevel() -> int:
-    """The stacklevel that attributes a warning to the first frame outside us.
-
-    A fixed number cannot be right here. ``query`` reaches its caller in four
-    frames, but ``query_for_llm`` delegates to ``query``, so the same warning
-    needs five to get past the library, and any future public read that
-    delegates would need its own count. A wrong count is not cosmetic: Python's
-    default filter ignores a DeprecationWarning unless it comes from
-    ``__main__``, so an attribution inside mareforma silences the notice for
-    every real caller, and it collapses every call site onto one dedup key so
-    only the first ever reports. Walking out of the package answers it for
-    every path at once. Falls back to 2 if the whole stack is ours, which only
-    happens when mareforma calls itself.
-    """
-    import sys
-    from pathlib import Path
-
-    package_dir = str(Path(__file__).resolve().parent)
-    frame = sys._getframe(1)
-    level = 1
-    while frame is not None:
-        if not str(Path(frame.f_code.co_filename).resolve()).startswith(package_dir):
-            return level
-        frame = frame.f_back
-        level += 1
-    return 2
-
-
-def _warn_min_support(value) -> None:
-    """Warn once per call when a read still filters on the retired ladder.
-
-    The retirement warned only on ``mareforma.REPLICATED``, the module
-    attribute, which is not how anyone uses the ladder: callers pass the level
-    as a plain string to ``min_support``. So the announcement reached the one
-    path nobody takes and stayed silent on the path everybody does, which would
-    have made the v0.4.0 removal arrive unannounced for every real caller.
-    """
-    if value is None:
-        return
-    from mareforma._deprecation import _emit
-
-    # +1 for _emit's own frame; see its docstring.
-    _emit(_MIN_SUPPORT_DEPRECATION, _caller_stacklevel() + 1)
 
 
 def _model_lineage_of(grounding):
@@ -205,8 +151,8 @@ def _synchronized(method):
     and returns rows the writer's rollback then erases. The cost is that a
     reader waits for the writer ahead of it, including the Rekor round trip
     ``submit_finding`` holds inside its transaction. Waiting is the lesser
-    harm: handing a caller a claim_id, a support level, or a trust map for
-    state that never lands is the failure this project exists to catch.
+    harm: handing a caller a claim_id or a trust map for state that never lands
+    is the failure this project exists to catch.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -232,7 +178,6 @@ class EpistemicGraph:
         trust_insecure_rekor: bool = False,
         rekor_log_pubkey_pem: bytes | None = None,
         rekor_key_provenance: str | None = None,
-        strict_promotion: bool = False,
         validator_type: str = "human",
     ) -> None:
         self._conn = conn
@@ -254,12 +199,11 @@ class EpistemicGraph:
         # submit and fetch re-validates, so the flag has to travel with
         # the URL or those re-validations reject what open() accepted.
         self._trust_insecure_rekor = trust_insecure_rekor
-        # Opt-in gate: require data on both sides of a REPLICATED pair. Off by
-        # default; threaded into every write path that can trigger promotion.
+        # Opt-in gate: require data on both sides of a converging pair. Off
+        # by default; threaded into every write path it bears on.
         # Asking for it also declares it on the project (see the end of
         # __init__), so this handle's copy of the flag only ever agrees with
         # the stored policy the write paths read.
-        self._strict_promotion = strict_promotion
         # Rekor log operator's public key, used to verify the signed
         # checkpoint that anchors each inclusion proof. When None,
         # mareforma trusts only the submit-time response binding (OUR
@@ -278,18 +222,11 @@ class EpistemicGraph:
         # Convergence detection swallows SQLite errors so a misconfigured
         # trigger or contention pattern cannot crash a write. A WARNING is
         # logged each time, but operators not watching logs would never know
-        # promotions stopped firing. Track the count here so it can be
-        # asserted in tests and surfaced in dashboards.
-        self._convergence_errors = 0
         # Rows a read dropped because their signature did not re-verify. The
         # enumerating surfaces cannot return them, so without this counter a
         # tampered graph reads as a graph with fewer claims.
         self._read_verify_exclusions = 0
-        self._read_unverified_exclusions = 0
         self._read_contested_rows = 0
-        # Whether any disclosure count stopped at its scan ceiling, so a reader
-        # knows the total is a floor rather than an exact number.
-        self._read_unverified_saturated = False
         # Per-kind occurrence counts behind the health-log rate limit. Not the
         # row totals: those are the numbers a reader wants, these only decide
         # when a line is worth writing.
@@ -348,16 +285,6 @@ class EpistemicGraph:
                     )
                 _warnings.warn(msg, stacklevel=2)
 
-        # strict_promotion governs a state transition applied to rows other
-        # sessions write, so it is a project rule and is recorded as one: the
-        # root signs a one-way policy every later opener reads. A caller who
-        # cannot make that declaration is refused here rather than handed a
-        # gate that only holds while their own handle is doing the writing.
-        if strict_promotion:
-            self._declare_project_policy(
-                "the strict-promotion policy", strict_promotion_required=True,
-            )
-
     # ------------------------------------------------------------------
     # Core API
     # ------------------------------------------------------------------
@@ -376,7 +303,6 @@ class EpistemicGraph:
         status: str = "open",
         artifact_hash: str | None = None,
         evidence: "dict | None" = None,
-        seed: bool = False,
         signer: "object | None" = None,
         predicate_payload: dict | None = None,
         original_signature_bundle: str | None = None,
@@ -392,8 +318,8 @@ class EpistemicGraph:
         #     NOT check that the signer's keyid is enrolled in the
         #     validators table, same trust model as
         #     ``mareforma.open(key_path=...)`` (anyone can sign, but
-        #     only enrolled keys can ``validate()`` claims to
-        #     ESTABLISHED). Use for multi-signer hosts that have
+        #     only enrolled keys can ``validate()`` a claim). Use for
+        #     multi-signer hosts that have
         #     multiple keys loaded (e.g. one per role-actor in the
         #     ``claim-with-roles:v1`` predicate variant).
         # predicate_payload:
@@ -436,17 +362,16 @@ class EpistemicGraph:
             Any mismatch raises
             :class:`mareforma.db.IdempotencyConflictError`. Silently
             merging two different claims would discard the second
-            author's content and break REPLICATED detection. For
-            cross-lab convergence, assert two separate claims that
-            share an ``ESTABLISHED`` entry in ``supports[]`` and are
-            signed by two distinct keys (distinct ``asserter_keyid``):
-            that's the path that fires REPLICATED honestly. Pass a
+            author's content and leave one line of evidence where there
+            were two. For cross-lab convergence, assert two separate
+            claims that share an entry in ``supports[]`` and are signed
+            by two distinct keys (distinct ``asserter_keyid``). Pass a
             per-call ``signer`` for each distinct asserter.
         generated_by:
             Agent identifier. Use ``"model/version/context"`` format.
-            Defaults to ``'agent'``. A display label only: it does not
-            decide REPLICATED convergence (the ``asserter_keyid`` from
-            the signature does).
+            Defaults to ``'agent'``. A display label only: it decides
+            nothing (the ``asserter_keyid`` from the signature is what a
+            reader counts).
         source_name:
             Data source this claim derives from. Required for ANALYTICAL
             classification to be meaningful.
@@ -459,7 +384,7 @@ class EpistemicGraph:
         artifact_hash:
             SHA256 hex digest of the output artifact (figure, CSV, model)
             backing this claim. When supplied it is bound into the signed
-            payload and used as a secondary collapse on REPLICATED: two
+            payload and read as a secondary collapse check: two
             peers citing the same upstream that BOTH supply an EQUAL hash
             are the same output, so they collapse to one line and do not
             converge on their own. Distinct hashes, or an absent hash on
@@ -488,8 +413,8 @@ class EpistemicGraph:
             ``submit_finding``, as ``obs.verdict.to_signed_dict()``. Bound
             into the signed statement and the chain hash and stored in the
             queryable ``observed_grounding`` column. ``UNGROUNDED`` or
-            ``OPAQUE`` blocks promotion; absent is read as no verdict
-            recorded and blocks nothing.
+            ``OPAQUE`` gates nothing; absent is read as no verdict
+            recorded.
             The axis is written from what the observer computed, not from
             this argument: the record is looked up by its receipt digest and
             the OBSERVER'S copy is what gets signed, so an edited state on a
@@ -623,9 +548,6 @@ class EpistemicGraph:
                     error=type(exc).__name__,
                 )
 
-        def _bump_convergence_errors(_exc: Exception) -> None:
-            self._convergence_errors += 1
-
         from mareforma.observe._binding import predicate_citation_sources
 
         # A claim asserted directly carries nothing to bind a verdict against:
@@ -670,18 +592,15 @@ class EpistemicGraph:
             unresolved=unresolved,
             artifact_hash=artifact_hash,
             evidence=ev,
-            seed=seed,
             signer=signer if signer is not None else self._signer,
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
             trust_insecure_rekor=self._trust_insecure_rekor,
-            on_convergence_error=_bump_convergence_errors,
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
             observed_grounding=observed_grounding,
             finding_record=finding_record,
-            strict_promotion=self._strict_promotion,
         )
 
     @_synchronized
@@ -689,10 +608,8 @@ class EpistemicGraph:
         self,
         text: str | None = None,
         *,
-        min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
-        include_unverified: bool = False,
         include_invalidated: bool = False,
         refutation_filter: str | None = None,
     ) -> list[dict]:
@@ -711,19 +628,10 @@ class EpistemicGraph:
         ----------
         text:
             Optional substring filter on claim text (case-insensitive).
-        min_support:
-            Minimum support level: 'PRELIMINARY' | 'REPLICATED' | 'ESTABLISHED'.
         classification:
             Filter by classification: 'INFERRED' | 'ANALYTICAL' | 'DERIVED'.
         limit:
             Maximum number of results. Default 20.
-        include_unverified:
-            When ``False`` (default), PRELIMINARY claims whose signing key
-            is not enrolled in the project's ``validators`` table are
-            excluded. Pass ``True`` to surface unverified preliminary
-            claims (e.g. inspection of pending work). REPLICATED and
-            ESTABLISHED rows already require an enrolled chain and are
-            never filtered by this flag.
         include_invalidated:
             When ``False`` (default), claims marked invalid by a signed
             contradiction verdict (``t_invalid IS NOT NULL``) are
@@ -747,11 +655,8 @@ class EpistemicGraph:
 
             Composition examples::
 
-                # high-confidence ESTABLISHED claims with no refutation
-                graph.query(
-                    min_support="ESTABLISHED",
-                    refutation_filter="clean",
-                )
+                # claims with no signed contradiction against them
+                graph.query(refutation_filter="clean")
 
                 # every claim with a signed contradiction, including
                 # the contradicting + contradicted pairs
@@ -760,32 +665,30 @@ class EpistemicGraph:
                     include_invalidated=True,
                 )
 
-                # clean claims mentioning "gene therapy" within
-                # unverified preliminary work. refutation_filter is a
-                # query-only feature; the search method does not accept it.
+                # clean claims mentioning "gene therapy". refutation_filter
+                # is a query-only feature; search does not accept it.
                 graph.query(
                     "gene therapy",
                     refutation_filter="clean",
-                    include_unverified=True,
                 )
 
         Returns
         -------
         list[dict]
-            Claim dicts ordered by support_level (desc) then created_at (desc).
+            Claim dicts ordered by created_at (desc).
             Each dict contains the standard claim columns plus two
             reputation projections computed at query time:
 
-              - ``validator_reputation`` (int): for ESTABLISHED rows, the
-                number of ESTABLISHED claims signed by the same
-                validator. ``0`` for non-ESTABLISHED rows.
+              - ``validator_reputation`` (int): for a row carrying a
+                validation, the number of claims the same validator has
+                signed off on. ``0`` for every other row.
               - ``generator_enrolled`` (bool): True iff the claim's
                 signing keyid is in the validators table.
 
         Raises
         ------
         ValueError
-            If ``min_support`` or ``classification`` is not a valid value.
+            If ``classification`` is not a valid value.
         ScanCeilingReached
             If the read exhausted its scan ceiling (``max(limit * 50, 5000)``
             ordered rows) before collecting ``limit`` survivors. Rows dropped
@@ -795,18 +698,14 @@ class EpistemicGraph:
             empty graph; narrow the query or lower ``limit``.
         """
         self._check_open()
-        _warn_min_support(min_support)
         return _db.query_claims(
             self._conn,
             text=text,
-            min_support=min_support,
             classification=classification,
             limit=limit,
-            include_unverified=include_unverified,
             include_invalidated=include_invalidated,
             refutation_filter=refutation_filter,
             on_verify_excluded=self._record_verify_exclusions,
-            on_unverified_excluded=self._record_unverified_exclusions,
             on_contested=self._record_contested_rows,
         )
 
@@ -834,8 +733,8 @@ class EpistemicGraph:
         A status change (open / contested / retracted) is an EDITORIAL
         action: it produces no signed envelope, requires no validator
         keyid, and is not round-tripped through the signature-verify
-        layer. An ESTABLISHED claim can be flipped to ``retracted`` by
-        any process with DB write access; nothing in mareforma
+        layer. A claim a human validated can be flipped to ``retracted``
+        by any process with DB write access; nothing in mareforma
         cryptographically records who pulled the lever. Compare with
         signed contradiction verdicts, which DO require an enrolled
         validator's signature and DO survive restore intact.
@@ -881,7 +780,6 @@ class EpistemicGraph:
             supports=supports,
             contradicts=contradicts,
             comparison_summary=comparison_summary,
-            strict_promotion=self._strict_promotion,
         )
 
     @_synchronized
@@ -916,10 +814,8 @@ class EpistemicGraph:
         self,
         query: str,
         *,
-        min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
-        include_unverified: bool = False,
         include_invalidated: bool = False,
     ) -> list[dict]:
         """FTS5 full-text search over claim text.
@@ -927,7 +823,7 @@ class EpistemicGraph:
         Returns claim dicts ordered by FTS5 rank (best match first).
         Parameters mirror :meth:`query`: same filters, same per-row
         projection (``validator_reputation``, ``generator_enrolled``),
-        same ``include_unverified`` semantics. The difference is the
+        same per-row disclosure. The difference is the
         underlying engine: :meth:`query` uses LIKE substring matching;
         :meth:`search` uses FTS5 with the unicode61 tokenizer (diacritics
         folded) and supports the FTS5 query grammar.
@@ -946,29 +842,25 @@ class EpistemicGraph:
 
             Pure-wildcard queries (``"*"``) are refused: they would
             scan the entire table.
-        min_support, classification, limit, include_unverified:
+        classification, limit:
             See :meth:`query`.
 
         Raises
         ------
         ValueError
             If ``query`` is empty or pure wildcards, or fails FTS5
-            parsing. Also for invalid ``min_support`` / ``classification``.
+            parsing. Also for an invalid ``classification``.
         ScanCeilingReached
             Same scan ceiling as :meth:`query`, on the ranked fetch.
         """
         self._check_open()
-        _warn_min_support(min_support)
         return _db.search_claims(
             self._conn,
             query,
-            min_support=min_support,
             classification=classification,
             limit=limit,
-            include_unverified=include_unverified,
             include_invalidated=include_invalidated,
             on_verify_excluded=self._record_verify_exclusions,
-            on_unverified_excluded=self._record_unverified_exclusions,
             on_contested=self._record_contested_rows,
         )
 
@@ -998,7 +890,7 @@ class EpistemicGraph:
     def _record_contested_rows(self, n: int) -> None:
         """Record that a read SERVED *n* rows whose contradiction record fails.
 
-        Counted apart from the unverified exclusions, which is the whole point.
+        Counted apart from the verify exclusions, which is the whole point.
         Those rows were withheld and the caller's list is short by them; these
         were handed over, and what is wrong with them is that ``t_invalid`` and
         the signed verdicts disagree. Filing one under the other would log a
@@ -1013,30 +905,6 @@ class EpistemicGraph:
         _health.append_health_event(
             self._root, "read_contested_served", outcome="degraded",
             n=n, total=self._read_contested_rows,
-        )
-
-    def _record_unverified_exclusions(self, n: int, saturated: bool = False) -> None:
-        """Record that a read held back *n* rows behind the unverified filter.
-
-        A PRELIMINARY claim whose generator key is not enrolled is dropped from
-        an enumerating read unless the caller passes ``include_unverified=True``.
-        Held back silently, that turns a record written under an unenrolled key
-        into an empty answer, and a caller reads the empty list as "there is
-        nothing here" rather than "there is something here you did not ask to
-        see". Counted so a surface can say how many, and rate-limited in the
-        health log for the same reason the verify exclusions are: it is a state
-        every read re-encounters, not a new event each time.
-        """
-        self._read_unverified_exclusions += n
-        if saturated:
-            self._read_unverified_saturated = True
-        if not self._health_append_due(
-                "read_unverified_excluded", self._read_unverified_exclusions):
-            return
-        from mareforma import health as _health
-        _health.append_health_event(
-            self._root, "read_unverified_excluded", outcome="degraded",
-            n=n, total=self._read_unverified_exclusions,
         )
 
     def _health_append_due(self, kind: str, total: int) -> bool:
@@ -1215,9 +1083,9 @@ class EpistemicGraph:
     def get_validator_reputation(self) -> dict[str, int]:
         """Return ``{validator_keyid: count}`` for every enrolled validator.
 
-        Count is the number of ESTABLISHED claims whose validation
-        envelope was signed by that keyid. Validators with zero
-        ESTABLISHED validations appear with ``count=0``. Derived state,
+        Count is the number of claims whose validation envelope was signed
+        by that keyid. Validators who have signed off on nothing appear with
+        ``count=0``. Derived state,
         recomputed on every call from the claims table; never cached.
         """
         self._check_open()
@@ -1843,8 +1711,8 @@ class EpistemicGraph:
         computed, and only such a verdict writes the observed axis. A
         :class:`~mareforma.observe.GroundingVerdict` a caller constructed is a
         declaration, whatever its type says: it is stored and reported as
-        ``DECLARED`` and neutralised out of ``GROUNDED``, so it cannot promote
-        and cannot read as an execution mareforma watched. The verdict is
+        ``DECLARED`` and neutralised out of ``GROUNDED``, so it cannot read as an
+        execution mareforma watched. The verdict is
         attested before it is bound to the finding's citation, so a declared one
         cannot borrow a real citation either.
 
@@ -2491,8 +2359,8 @@ class EpistemicGraph:
             return self._annotate_unbound(record)
 
         # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is, an OPAQUE
-        # or UNGROUNDED verdict does not promote and does not claim the data
-        # arrived, so a mismatched cited set on it is not a false trust signal.
+        # or UNGROUNDED verdict does not claim the data arrived, so a mismatched
+        # cited set on it is not a false trust signal.
         if record.get("grounding") != ObservedGrounding.GROUNDED.value:
             return record
 
@@ -2568,7 +2436,6 @@ class EpistemicGraph:
         self,
         text: str | None = None,
         *,
-        min_support: str | None = None,
         classification: str | None = None,
         limit: int = 20,
     ) -> list[dict]:
@@ -2603,7 +2470,6 @@ class EpistemicGraph:
 
         rows = self.query(
             text=text,
-            min_support=min_support,
             classification=classification,
             limit=limit,
         )
@@ -2617,7 +2483,11 @@ class EpistemicGraph:
         validated_by: str | None = None,
         evidence_seen: list[str] | None = None,
     ) -> None:
-        """Promote a REPLICATED claim to ESTABLISHED (human validation).
+        """Record a human validator's signed sign-off on a claim.
+
+        Writes a signed envelope onto the row and nothing else. A validation
+        is terminal: a claim already carrying one is refused rather than
+        overwritten.
 
         Identity check
         --------------
@@ -2631,12 +2501,12 @@ class EpistemicGraph:
         The validation event is itself signed (binding claim_id +
         validator_keyid + validated_at + evidence_seen). The signed
         envelope is stored on the row's ``validation_signature`` column
-        so the promotion is independently verifiable.
+        so the validation is independently verifiable.
 
         Parameters
         ----------
         claim_id:
-            UUID of the claim to promote.
+            UUID of the claim to record the validation on.
         validated_by:
             Optional human-readable label stored alongside the keyid.
             The validator's keyid is the real identity; this string is
@@ -2656,14 +2526,14 @@ class EpistemicGraph:
             but the field shifts "a human pressed a button" to "a human
             pressed a button AND named the evidence they consulted." A
             validator who consistently signs ``evidence_seen=[]`` leaves
-            an audit-visible trail of unreviewed promotions.
+            an audit-visible trail of unreviewed validations.
 
         Raises
         ------
         ClaimNotFoundError
             If claim_id does not exist.
         ValueError
-            If support_level is not 'REPLICATED', or the graph has no
+            If the claim is not open, or the graph has no
             loaded signer, or the loaded signer is not enrolled as a
             validator on this project.
         EvidenceCitationError
@@ -2674,7 +2544,7 @@ class EpistemicGraph:
             any mareforma-level structural or cryptographic gate
             (malformed payload, non-enrolled signer, wrong payloadType,
             signature verification failure, or payload-field mismatch
-            against the row being promoted). Should not fire on the
+            against the row being validated). Should not fire on the
             standard wrapper path (the wrapper builds the envelope
             from the same kwargs it threads through), but is listed
             for completeness because the underlying
@@ -2682,13 +2552,13 @@ class EpistemicGraph:
             a bypass at this layer too.
         LLMValidatorPromotionError
             If the loaded signer is enrolled with ``validator_type='llm'``.
-            LLM-typed validators can sign validation envelopes but
-            cannot promote past REPLICATED. Have a human-typed
-            validator call :meth:`validate` instead.
+            LLM-typed validators can sign validation envelopes, and
+            recording one is refused. Have a human-typed validator call
+            :meth:`validate` instead.
         SelfValidationError
             If the loaded signer's keyid equals the claim's
-            ``signature_bundle`` signing keyid. Promotion requires an
-            external witnessing validator; self-validation is the
+            ``signature_bundle`` signing keyid. A validation has to come
+            from a key that did not sign the claim; self-validation is the
             trivial-loop attack.
         """
         self._check_open()
@@ -2769,9 +2639,8 @@ class EpistemicGraph:
         validator_type:
             ``'human'`` (default) or ``'llm'``. Self-declared honesty
             signal bound into the signed enrollment envelope. LLM-typed
-            validators may sign validation envelopes but cannot promote
-            a claim past REPLICATED: :meth:`validate` refuses them in
-            mareforma.
+            validators may sign validation envelopes, and recording one
+            is refused: :meth:`validate` turns them away.
 
         Raises
         ------
@@ -2911,101 +2780,6 @@ class EpistemicGraph:
         return _validators.list_validators_verified(self._conn)
 
     @_synchronized
-    def refresh_convergence(self) -> dict[str, int]:
-        """Retry convergence detection for every flagged claim.
-
-        Convergence detection (PRELIMINARY → REPLICATED promotion) runs
-        after a successful claim INSERT. When a SQLite trigger or
-        contention pattern causes that detection to raise, mareforma
-        swallows the error so the write never crashes, logs a WARNING,
-        increments :attr:`convergence_errors`, and sets
-        ``convergence_retry_needed = 1`` on the affected claim.
-
-        This method walks every flagged row, re-runs detection, and
-        clears the flag on success. Failed retries stay flagged and are
-        eligible for the next call. A single error on retry increments
-        :attr:`convergence_errors` again, mirroring the original
-        swallowed-error semantics.
-
-        Returns
-        -------
-        dict
-            ``{"checked", "retried_ok", "promoted", "still_pending"}``:
-            int counts. ``checked`` is the total rows examined;
-            ``retried_ok`` is the number that ran detection cleanly this
-            pass (the flag was cleared); ``promoted`` is the subset of
-            those whose support level actually moved, so a claim with no
-            converging peer recovers cleanly and counts zero promotions;
-            ``still_pending`` is the number that errored again and remain
-            flagged.
-
-        Side effects: only the per-claim flag column and (transitively)
-        the convergence-detection promotions themselves are mutated.
-        Signed predicate fields are unchanged.
-        """
-        self._check_open()
-
-        flagged = _db.list_convergence_retry_claims(self._conn)
-
-        checked = len(flagged)
-        retried_ok = 0
-        promoted = 0
-        still_pending = 0
-
-        with self.defer_backup():
-            for row in flagged:
-                try:
-                    supports = json.loads(row.get("supports_json") or "[]")
-                except (json.JSONDecodeError, TypeError):
-                    supports = []
-                generated_by = row.get("generated_by") or DEFAULT_RUN_TOKEN
-                artifact_hash = row.get("artifact_hash")
-                claim_id = row["claim_id"]
-
-                def _bump(_exc: Exception) -> None:
-                    self._convergence_errors += 1
-
-                ok = _db._maybe_update_replicated(
-                    self._conn,
-                    claim_id,
-                    supports,
-                    generated_by,
-                    artifact_hash,
-                    on_error=_bump,
-                    strict_promotion=self._strict_promotion,
-                )
-                if ok:
-                    _db.clear_convergence_retry_flag(
-                        self._conn, self._root, claim_id,
-                    )
-                    retried_ok += 1
-                    # The helper returns clean-or-swallowed-error, never
-                    # whether a row was promoted, so read the support level
-                    # back. Detection that ran and moved nothing (the common
-                    # case: no converging peer) must not report a promotion.
-                    if self._support_level(claim_id) != row["support_level"]:
-                        promoted += 1
-                else:
-                    still_pending += 1
-
-        return {
-            "checked": checked,
-            "retried_ok": retried_ok,
-            "promoted": promoted,
-            "still_pending": still_pending,
-        }
-
-    def _support_level(self, claim_id: str) -> str | None:
-        """The claim's current support level, or None when it is gone.
-
-        Reads the column directly so a retry pass can tell a promotion from a
-        clean run that moved nothing.
-        """
-        row = self._conn.execute(
-            "SELECT support_level FROM claims WHERE claim_id = ?", (claim_id,)
-        ).fetchone()
-        return row["support_level"] if row is not None else None
-
     def classify_supports(
         self, values: list[str],
     ) -> list[dict[str, str]]:
@@ -3014,7 +2788,7 @@ class EpistemicGraph:
         Thin wrapper over :func:`mareforma.db.classify_supports`. Returns
         ``[{"value": ..., "type": ...}, ...]`` in input order.
         Mareforma uses this same classification for cycle detection,
-        REPLICATED anchoring, dangling-reference audit, and JSON-LD
+        shared-anchor counting, dangling-reference audit, and JSON-LD
         export. Exposed publicly so callers can introspect what
         mareforma sees for any candidate list before insertion.
 
@@ -3035,7 +2809,7 @@ class EpistemicGraph:
         The returned object is the agent-readable interface to
         mareforma. It snapshots, in one deterministic shape:
 
-        * the focal claim's identity, classification, support_level,
+        * the focal claim's identity, classification,
           status, GRADE evidence vector, asserter, and role
           attestations (the signatures in the DSSE envelope)
         * a recursive upstream chain (``supports[]`` walked to *depth*
@@ -3093,8 +2867,8 @@ class EpistemicGraph:
 
         # query_provenance is an audit surface, so it FLAGS each high-trust
         # row's verify-on-read result rather than excluding a tampered row:
-        # an auditor must be able to see a forged ESTABLISHED/REPLICATED row
-        # and know it failed verification. One cache for the whole walk, the
+        # an auditor must be able to see a forged row and know it failed
+        # verification. One cache for the whole walk, the
         # focal row included, so a signature is checked once per call.
         prov_verify_cache: dict = {}
 
@@ -3257,8 +3031,9 @@ class EpistemicGraph:
         design: a ``supports`` entry could legitimately reference a
         claim from another project or a not-yet-asserted upstream. This
         helper is for auditing integrity, not for blocking writes.
-        REPLICATED detection already refuses to promote on a dangling
-        reference, so a hanging arrow cannot trigger spurious promotion.
+        A dangling reference points at no claim, so nothing counts it as a
+        shared anchor and a hanging arrow cannot make two claims look
+        convergent.
 
         Raises
         ------
@@ -3283,8 +3058,8 @@ class EpistemicGraph:
         ``signature_bundle`` is non-NULL and whose ``transparency_logged``
         is 0, the original envelope is re-submitted to the Rekor URL the
         graph was opened with. Success updates the bundle (attaches the
-        log entry coordinates) and flips ``transparency_logged`` to 1; the
-        REPLICATED check fires inside the same transaction.
+        log entry coordinates) and flips ``transparency_logged`` to 1, both
+        inside the same transaction.
 
         No-op modes
         -----------
@@ -3459,7 +3234,6 @@ class EpistemicGraph:
                     )
                     _db.mark_claim_logged(
                         self._conn, self._root, cid, new_bundle,
-                        strict_promotion=self._strict_promotion,
                     )
                     logged_count += 1
                     continue
@@ -3528,8 +3302,7 @@ class EpistemicGraph:
                     new_bundle = json.dumps(
                         augmented, sort_keys=True, separators=(",", ":"),
                     )
-                    _db.mark_claim_logged(self._conn, self._root, cid, new_bundle,
-                                          strict_promotion=self._strict_promotion)
+                    _db.mark_claim_logged(self._conn, self._root, cid, new_bundle)
                     logged_count += 1
                 else:
                     still_unlogged += 1
@@ -3554,8 +3327,8 @@ class EpistemicGraph:
 
         Returns two plain Python functions that any agent framework can wrap.
         ``generated_by`` is baked into the closure as a display and provenance
-        label on each claim. REPLICATED independence keys on the signing key
-        (``asserter_keyid``), not on that label, and every tool from one
+        label on each claim. Independence is read off the signing key
+        (``asserter_keyid``), not off that label, and every tool from one
         binding signs with the key the graph was opened with: all claims
         recorded through it share one asserter keyid. Independent lines need a
         graph handle per agent, each opened with its own key, or
@@ -3597,43 +3370,34 @@ class EpistemicGraph:
         """
         self._check_open()
 
-        def query_graph(topic: str, min_support: str | None = None) -> str:
+        def query_graph(topic: str) -> str:
             """Query the epistemic graph for what is already established about a topic.
 
-            Call this BEFORE asserting any new finding. If REPLICATED or ESTABLISHED
-            findings exist, build on them using DERIVED classification with their
+            Call this BEFORE asserting any new finding. If findings already
+            exist, build on them using DERIVED classification with their
             claim_ids in supports=[]. Returns a JSON list of matching claims.
 
             Parameters
             ----------
             topic:
                 Substring to search for in claim text (case-insensitive).
-            min_support:
-                Minimum trust level: PRELIMINARY, REPLICATED, or ESTABLISHED.
-                Defaults to no filter. It used to default to ``PRELIMINARY``,
-                which is the floor and so filtered nothing, but still counted
-                as the caller asking for the retired support ladder: every call
-                warned about a deprecation the caller had not opted into, and
-                the warning named a library default the agent author could not
-                change. Passing nothing now means asking for nothing.
 
             Returns
             -------
             str
-                JSON array of claim dicts with keys: text, support_level,
+                JSON array of claim dicts with keys: text,
                 classification, status, claim_id. The ``text`` field is
                 sanitized and wrapped in
                 ``<untrusted_data>...</untrusted_data>``: this tool is
                 consumed by an LLM, so it routes through the same
                 prompt-safety layer as :meth:`query_for_llm`. ``status``
                 is surfaced so the LLM can spot editorial taint
-                (``contested`` / ``retracted``) even on REPLICATED rows.
+                (``contested`` / ``retracted``) on any row.
             """
-            results = self.query_for_llm(topic, min_support=min_support)
+            results = self.query_for_llm(topic)
             return json.dumps([
                 {
                     "text": r["text"],
-                    "support_level": r["support_level"],
                     "classification": r["classification"],
                     "status": r["status"],
                     "claim_id": r["claim_id"],
@@ -3727,28 +3491,11 @@ class EpistemicGraph:
     # ------------------------------------------------------------------
 
     @property
-    def convergence_errors(self) -> int:
-        """Number of swallowed SQLite errors during convergence detection.
-
-        Convergence detection (PRELIMINARY → REPLICATED promotion) runs
-        after a successful claim INSERT and swallows SQLite errors so a
-        misconfigured trigger or contention pattern can never crash a
-        write. A WARNING is logged each time; this counter mirrors that
-        log so the failure is observable without log parsing.
-
-        Resets to zero each time the graph is re-opened. A non-zero value
-        means at least one assertion since open completed but its
-        promotion check did not run cleanly; inspect the warnings in the
-        ``mareforma`` logger for details.
-        """
-        return self._convergence_errors
-
-    @property
     def read_verify_exclusions(self) -> int:
         """Rows :meth:`query` and :meth:`search` dropped as unverifiable.
 
-        A REPLICATED or ESTABLISHED row whose signature does not re-verify
-        is excluded from every enumerating read, and no flag brings it back.
+        A row carrying signed material that does not re-verify is excluded
+        from every enumerating read, and no flag brings it back.
         The result is a shorter list that reads exactly like a graph missing
         those claims, so the exclusion is counted here (and appended to
         ``.mareforma/health.jsonl`` as ``read_verify_excluded``).
@@ -3765,23 +3512,6 @@ class EpistemicGraph:
         """
         return self._read_verify_exclusions
 
-    @property
-    def read_unverified_exclusions(self) -> int:
-        """Rows :meth:`query` and :meth:`search` held back behind the filter.
-
-        A PRELIMINARY claim whose generator key is not in the validators table
-        is dropped from an enumerating read unless ``include_unverified=True``.
-        Unlike the verify exclusions above, a flag DOES bring these back: they
-        are not tampered rows, they are rows the default read does not vouch
-        for. Counted so an empty answer can be told from an empty record, which
-        is the difference between "there is nothing here" and "there is
-        something here you did not ask to see".
-
-        Resets to zero each time the graph is re-opened, and counts only the
-        reads this session made.
-        """
-        return self._read_unverified_exclusions
-
     @_synchronized
     def health(self) -> dict[str, int]:
         """Single-call audit summary of mareforma state.
@@ -3795,26 +3525,20 @@ class EpistemicGraph:
         -------
         dict[str, int]
             ``claim_count``: total claims in the graph (signed and
-            unsigned, all support levels, all statuses).
+            unsigned, every status).
             ``validator_count``: total rows in the validators table
             (every enrolled identity, including LLM-typed).
             ``unresolved_claims``: claims flagged ``unresolved=1``
-            (a legacy quarantine flag; blocks REPLICATED promotion).
+            (their citations did not all resolve).
             ``unsigned_claims``: claims with ``signature_bundle IS
-            NULL`` (no Ed25519 envelope; blocks REPLICATED promotion
-            and any cross-restore verification).
+            NULL`` (no Ed25519 envelope, so nothing to verify on read or
+            across a restore).
             ``dangling_supports``: count of UUID-shaped ``supports[]``
             entries pointing to claims that do not exist in the graph
             (returned in detail by :meth:`find_dangling_supports`).
-            ``convergence_errors``: current value of the swallowed-
-            error counter (see :attr:`convergence_errors`).
-            ``convergence_retry_pending``: claims with
-            ``convergence_retry_needed=1`` waiting for
-            :meth:`refresh_convergence` to re-run detection.
 
         A "healthy" graph has zeros across ``unresolved_claims``,
-        ``unsigned_claims``, ``dangling_supports``,
-        ``convergence_errors``, and ``convergence_retry_pending``.
+        ``unsigned_claims`` and ``dangling_supports``.
         Non-zero values do not by themselves indicate a defect: they
         indicate something the operator should look at.
         """
@@ -3838,11 +3562,6 @@ class EpistemicGraph:
         # here has the column. No defensive try/except needed, a
         # missing column would mean a corrupt graph.db, which is the
         # operator-level concern open_db already raises for.
-        convergence_retry_pending = _count(
-            "SELECT COUNT(*) FROM claims "
-            "WHERE convergence_retry_needed = 1"
-        )
-
         dangling_supports = len(_db.find_dangling_supports(self._conn))
 
         return {
@@ -3851,8 +3570,6 @@ class EpistemicGraph:
             "unresolved_claims": unresolved_claims,
             "unsigned_claims": unsigned_claims,
             "dangling_supports": dangling_supports,
-            "convergence_errors": self._convergence_errors,
-            "convergence_retry_pending": convergence_retry_pending,
         }
 
     # ------------------------------------------------------------------

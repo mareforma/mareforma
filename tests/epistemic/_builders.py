@@ -31,10 +31,10 @@ from mareforma.trust import (
 # ---------------------------------------------------------------------------
 
 def open_graph(tmp_path: Path):
-    """Open a graph with a bootstrapped key so ``seed=True`` works.
+    """Open a graph with a bootstrapped key.
 
-    A loaded signing key is needed because ESTABLISHED-upstream promotion
-    and ``assert_finding`` both write signed claims. On a fresh project the
+    A loaded signing key is needed because ``assert_finding`` and the
+    anchors these tests build both write signed claims. On a fresh project the
     key auto-enrolls as the root validator, which is what ``graph.validate()``
     needs. Returns the unclosed graph; callers use
     ``with open_graph(tmp_path) as g:``.
@@ -49,8 +49,8 @@ def open_graph(tmp_path: Path):
 def _bootstrap_validator_key(tmp_path: Path) -> Path:
     """Bootstrap a second signing key and return its path.
 
-    The graph refuses self-validation, so promoting a REPLICATED claim needs
-    a key distinct from the one that signed the claim.
+    The graph refuses self-validation, so signing off on a claim needs a key
+    distinct from the one that signed it.
     """
     from mareforma import signing as _signing
     key_path = tmp_path / "validator.key"

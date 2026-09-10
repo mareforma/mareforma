@@ -212,7 +212,7 @@ def bootstrap_cmd(key_path: str | None, overwrite: bool) -> None:
     _info("Next steps:")
     _info("  • The first key opened against a project's graph auto-enrolls")
     _info("    as the root validator on that project.")
-    _info("  • To promote a claim to ESTABLISHED you need a SECOND enrolled")
+    _info("  • To record a validation on a claim you need a SECOND enrolled")
     _info("    key (mareforma refuses self-validation). Have a")
     _info("    collaborator run `mareforma bootstrap`, then run")
     _info("    `mareforma key show --pem > pubkey.pem` and send it to you;")
@@ -305,7 +305,7 @@ def key_show(key_path: str | None, as_pem: bool, as_keyid: bool) -> None:
 
 @cli.group()
 def validator() -> None:
-    """Manage the per-project validators table (who may promote ESTABLISHED)."""
+    """Manage the per-project validators table (who may sign a validation)."""
 
 
 @validator.command("add")
@@ -321,9 +321,8 @@ def validator() -> None:
     "--type", "validator_type",
     type=click.Choice(["human", "llm"]), default="human", show_default=True,
     help=(
-        "Self-declared validator type. 'human' may promote claims to "
-        "ESTABLISHED; 'llm' may sign validations but cannot promote "
-        "past REPLICATED."
+        "Self-declared validator type. 'human' may sign a validation; "
+        "'llm' may not, and a validation signed by one is refused."
     ),
 )
 def validator_add(pubkey_arg: str, identity: str, validator_type: str) -> None:
@@ -447,8 +446,8 @@ def validator_list(as_json: bool) -> None:
     unverified = [r for r in rows if not r["verified"]]
     if unverified:
         _err(f"{len(unverified)} of {len(rows)} listed validators do not "
-             "chain back to the root. They cannot promote claims, and the "
-             "rows were not written by `mareforma validator add`.")
+             "chain back to the root. A validation they sign is refused, and "
+             "the rows were not written by `mareforma validator add`.")
         sys.exit(1)
 
 
@@ -462,8 +461,9 @@ def validator_list(as_json: bool) -> None:
 def status_cmd(as_json: bool) -> None:
     """Show epistemic health dashboard.
 
-    Traffic light: GREEN (≥1 replicated/established), YELLOW (all preliminary),
-    RED (no claims).
+    Traffic light: GREEN (a standing claim carries a signed validation and
+    everything signed re-verifies), YELLOW (none does, or something signed
+    fails to re-verify), RED (no claims).
 
     \b
     Examples:
@@ -498,41 +498,12 @@ def status_cmd(as_json: bool) -> None:
         f"{report.claims_contradicted} contradicted"
     )
 
-    # Read the computed flag rather than re-deriving the same predicate here.
-    # It was computed and no surface read it, which is how the two copies of one
-    # rule start to disagree about when the disclosure applies.
-    if report.support_level_retired:
-        click.echo("  Support level breakdown:")
-        for level in ("ESTABLISHED", "REPLICATED", "PRELIMINARY"):
-            count = report.support_level_breakdown.get(level, 0)
-            if count:
-                bar = "█" * min(count, 20)
-                click.echo(f"    {level:14} {bar}  {count}")
-        click.echo(
-            "  " + click.style(
-                "The support ladder (PRELIMINARY / REPLICATED / ESTABLISHED) is "
-                "a retired axis, removed in v0.4.0. A project stores one even if "
-                "no level was ever named. Read the computed status instead.",
-                fg="yellow",
-            )
-        )
-
     if report.failed_verification:
         click.echo(
             "  " + click.style(
-                f"Unverified promotions: {report.failed_verification} "
-                "(support level not backed by signed material)",
+                f"Unverified rows: {report.failed_verification} "
+                "(signed material does not re-verify)",
                 fg="red", bold=True,
-            )
-        )
-
-    if report.convergence_retry_pending:
-        click.echo(
-            "  " + click.style(
-                f"Convergence retry pending: {report.convergence_retry_pending} "
-                "(a promotion check was swallowed; run "
-                "graph.refresh_convergence() to re-run it)",
-                fg="yellow",
             )
         )
 
@@ -541,9 +512,8 @@ def status_cmd(as_json: bool) -> None:
             "  " + click.style(
                 "Project policy unverified: the stored policy row's root "
                 "signature does not verify, so every rule reads at maximum "
-                "strictness (witnessing and strict promotion both required). "
-                "Re-sign the policy with the project root or restore from a "
-                "clean backup.",
+                "strictness and witnessing is required. Re-sign the policy "
+                "with the project root or restore from a clean backup.",
                 fg="red", bold=True,
             )
         )
@@ -1971,8 +1941,8 @@ def claim() -> None:
 
     Claims are falsifiable assertions with a classification (INFERRED |
     ANALYTICAL | DERIVED). Trust reads off the derived status a claim earns in
-    the graph; the stored support level (PRELIMINARY -> REPLICATED ->
-    ESTABLISHED) is the legacy promotion ladder, deprecated for v0.4.0.
+    the graph, and off whether a human signed a validation on it. A claim
+    carries no stored level.
 
     \b
     Examples:
@@ -2104,11 +2074,11 @@ def claim_list(status, source_name, limit, as_json):
     click.echo(click.style(heading, bold=True, fg="cyan"))
     click.echo("")
     for c in claims:
-        # A high-trust row whose signature no longer re-verifies still prints,
-        # so an auditor can see it, but never as if its level were sound.
+        # A row whose signature no longer re-verifies still prints, so an
+        # auditor can see it, but never without saying so.
         mark = "" if c.get("verified", True) else " UNVERIFIED"
         click.echo(
-            f"  [{c['status']:10}] [{c.get('support_level', 'PRELIMINARY'):12}] "
+            f"  [{c['status']:10}] "
             f"[{c.get('classification', 'INFERRED'):10}] {c['text'][:60]}{mark}"
         )
         click.echo(f"             id: {c['claim_id']}")
@@ -2147,15 +2117,12 @@ def claim_show(claim_id, as_json):
     click.echo(f"  id             : {c['claim_id']}")
     click.echo(f"  text           : {c['text']}")
     click.echo(f"  classification : {c.get('classification', 'INFERRED')}")
-    # The support level never prints alone on a row whose signature no longer
-    # re-verifies. `claim list` already marks that row UNVERIFIED, and `claim
-    # show` is the command an auditor runs on the claim they suspect, so it is
-    # the last place that should print REPLICATED with nothing beside it.
-    level = c.get("support_level", "PRELIMINARY")
     if not c.get("verified", True):
-        level += "  UNVERIFIED (the signature no longer re-verifies, so this "
-        level += "level is not backed; run `mareforma verify` on it)"
-    click.echo(f"  support_level  : {level}")
+        click.echo("  " + click.style(
+            "UNVERIFIED: the signed material does not check out on read; run "
+            "`mareforma verify` on this claim",
+            fg="yellow",
+        ))
     click.echo(f"  generated_by   : {c.get('generated_by', 'agent')}")
     click.echo(f"  status         : {c['status']}")
     if c.get("source_name"):
@@ -2224,7 +2191,7 @@ def claim_update(claim_id, status, text, supports, contradicts):
 @click.option("--validated-by", "validated_by", default=None,
               help="Identifier of the human reviewer (e.g. email).")
 def claim_validate(claim_id, validated_by):
-    """Promote a REPLICATED claim to ESTABLISHED (human validation).
+    """Record a human validation on a claim, signed.
 
     The currently loaded signing key (from ``~/.config/mareforma/key``)
     must be enrolled as a validator on this project. The validation
@@ -2261,7 +2228,7 @@ def claim_validate(claim_id, validated_by):
         _err(str(exc))
         sys.exit(1)
     except ValueError as exc:
-        # Mareforma ValueErrors carry actionable text (wrong support_level,
+        # Mareforma ValueErrors carry actionable text (wrong classification,
         # signer not enrolled, no signer loaded). Pass through verbatim.
         _err(str(exc))
         sys.exit(1)
@@ -2275,7 +2242,7 @@ def claim_validate(claim_id, validated_by):
         _err(str(exc))
         sys.exit(1)
 
-    _ok(f"Claim '{claim_id}' promoted to ESTABLISHED.")
+    _ok(f"Claim '{claim_id}' carries a signed validation.")
     if validated_by:
         _info(f"validated_by: {validated_by}")
 
@@ -2290,7 +2257,19 @@ def claim_validate(claim_id, validated_by):
     type=click.Path(exists=False, dir_okay=False, path_type=Path),
     required=False,
 )
-def restore_cmd(claims_toml_path: Path | None) -> None:
+@click.option(
+    "--trust-unaccounted-backup",
+    is_flag=True,
+    default=False,
+    help=(
+        "Restore a backup whose completeness table does not match what the "
+        "file holds. For a file you edited on purpose: without it, such a "
+        "file is refused."
+    ),
+)
+def restore_cmd(
+    claims_toml_path: Path | None, trust_unaccounted_backup: bool,
+) -> None:
     """Rebuild graph.db from claims.toml (catastrophic-loss recovery).
 
     Reads the TOML state file written by every claim/validator mutation
@@ -2307,12 +2286,22 @@ def restore_cmd(claims_toml_path: Path | None) -> None:
     Examples:
         mareforma restore                    # uses ./claims.toml
         mareforma restore backups/state.toml # explicit source
+        mareforma restore --trust-unaccounted-backup  # a file you edited
+
+    A backup that does not hold what its completeness table says it holds is
+    refused. That is a file short of rows with nothing recording they were
+    there. If you edited it deliberately, the flag above restores it as it
+    stands. A backup written before the table carries none of this and
+    restores unchanged.
     """
     import mareforma
     from mareforma.db import RestoreError
 
     try:
-        result = mareforma.restore(_root(), claims_toml=claims_toml_path)
+        result = mareforma.restore(
+            _root(), claims_toml=claims_toml_path,
+            trust_unaccounted_backup=trust_unaccounted_backup,
+        )
     except RestoreError as exc:
         _err(str(exc))
         sys.exit(1)

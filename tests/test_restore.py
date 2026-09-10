@@ -28,17 +28,17 @@ from tests._helpers import _bootstrap_key, _pem_of
 
 def _build_full_graph(tmp_path: Path) -> dict:
     """Populate a project with the full graph surface: root validator,
-    second validator, seed claim, REPLICATED pair, ESTABLISHED claim,
+    second validator, seed claim, converged pair, validated claim,
     one unsigned PRELIMINARY (in a separate unsigned-mode project).
 
     Returns identifiers used by tests for verification.
 
-    REPLICATED now keys on two distinct, non-NULL ``asserter_keyid`` values
+    A reader counts two lines on two distinct, non-NULL ``asserter_keyid`` values
     (the per-claim signer), not distinct ``generated_by``. The two converging
     "converged" claims are therefore signed by two distinct *enrolled* keys
     (the root key and ``val_key``) so the pair promotes AND every signed claim's
     keyid still appears in the validators section (restore's orphan-signer gate
-    requires this). The validator that promotes ``rep_id`` to ESTABLISHED must
+    requires this). The validator that signs off on ``rep_id`` must
     differ from BOTH asserter signers, so a third enrolled key (``val2_key``)
     performs the validation.
     """
@@ -49,9 +49,9 @@ def _build_full_graph(tmp_path: Path) -> dict:
     val_signer = _signing.load_private_key(val_key)
 
     with mareforma.open(tmp_path, key_path=root_key) as g:
-        seed_id = g.assert_claim("anchor", generated_by="seed", seed=True)
+        seed_id = g.assert_claim("anchor", generated_by="seed")
         # Two converging peers signed by two distinct enrolled keys → the
-        # asserter_keyids differ → REPLICATED fires. Enroll val_key (the
+        # asserter_keyids differ, so the two count apart. Enroll val_key (the
         # second asserter) and val2_key (the future validator) first so both
         # signed peers' keyids are present in the validators section.
         g.enroll_validator(_pem_of(val_key), identity="v")
@@ -68,7 +68,6 @@ def _build_full_graph(tmp_path: Path) -> dict:
     # Validate with a third key distinct from both asserters (root, val).
     with mareforma.open(tmp_path, key_path=val2_key) as g:
         g.validate(rep_id)
-        assert g.get_claim(rep_id)["support_level"] == "ESTABLISHED"
 
     return {
         "root_key": root_key,
@@ -99,7 +98,7 @@ class TestRestoreHappyPath:
         # Capture pre-state via the live graph.
         with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
             pre_claims = sorted(
-                g.query(include_unverified=True, limit=99),
+                g.query(limit=99),
                 key=lambda c: c["created_at"],
             )
             from mareforma import validators as _validators
@@ -116,12 +115,13 @@ class TestRestoreHappyPath:
             "claims_restored": pre_count,
             # Nothing unsigned in an honest signed backup.
             "unsigned_in_signed_mode": 0,
+            "verdict_chain_withheld": 0,
         }
 
         # Re-open the restored graph and confirm shape.
         with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
             post_claims = sorted(
-                g.query(include_unverified=True, limit=99),
+                g.query(limit=99),
                 key=lambda c: c["created_at"],
             )
             post_validators = _validators.list_validators(g._conn)
@@ -130,7 +130,6 @@ class TestRestoreHappyPath:
         for pre, post in zip(pre_claims, post_claims):
             assert pre["claim_id"] == post["claim_id"]
             assert pre["text"] == post["text"]
-            assert pre["support_level"] == post["support_level"]
             assert pre["signature_bundle"] == post["signature_bundle"]
             assert pre["validation_signature"] == post["validation_signature"]
             assert pre["validator_keyid"] == post["validator_keyid"]
@@ -161,7 +160,7 @@ class TestRestoreHappyPath:
             assert g.assert_claim(
                 "a resumable step", idempotency_key="run-1:s3",
             ) == cid
-            assert len(g.query(include_unverified=True, limit=99)) == 1
+            assert len(g.query(limit=99)) == 1
 
     def test_restore_rebuilds_fts_index(self, tmp_path: Path) -> None:
         """The INSERT triggers fire during restore, populating
@@ -171,10 +170,10 @@ class TestRestoreHappyPath:
         mareforma.restore(tmp_path)
         with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
             results = g.search("converged")
-        # Two REPLICATED claims share the text "converged".
+        # Two converged claims share the text "converged".
         assert len(results) >= 1
         # And one carries the validator_reputation projection.
-        ranked = [r for r in results if r["support_level"] == "ESTABLISHED"]
+        ranked = [r for r in results if r.get("validation_signature")]
         if ranked:
             assert ranked[0]["validator_reputation"] >= 1
 
@@ -191,6 +190,7 @@ class TestRestoreHappyPath:
         assert result == {
             "validators_restored": 0, "claims_restored": 2,
             "unsigned_in_signed_mode": 0,
+            "verdict_chain_withheld": 0,
         }
 
 
@@ -422,55 +422,6 @@ class TestRestoreAdversarial:
             mareforma.restore(tmp_path)
         assert exc_info.value.kind == "claim_unverified"
 
-    def test_tampered_status_on_seed_blocked_at_replicated_gate(
-        self, tmp_path: Path,
-    ) -> None:
-        """A born-retracted ESTABLISHED seed (planted via a hand-edited
-        claims.toml) is restorable — the seed envelope binds claim_id +
-        validator_keyid + seeded_at but NOT status. The graph gate
-        at _maybe_update_replicated_unlocked must refuse the retracted
-        seed as an upstream anchor, blocking downstream REPLICATED."""
-        ctx = self._setup_and_wipe(tmp_path)
-        data = self._read_toml(tmp_path)
-        # Find the seed (ESTABLISHED + has validation_signature with
-        # PAYLOAD_TYPE_SEED). Set its status to 'retracted' in TOML.
-        for cid, c in data["claims"].items():
-            if c.get("support_level") == "ESTABLISHED" and c.get(
-                "validation_signature"
-            ):
-                env = json.loads(c["validation_signature"])
-                if env.get("payloadType") == _signing.PAYLOAD_TYPE_SEED:
-                    c["status"] = "retracted"
-                    seed_id = cid
-                    break
-        self._write_toml(tmp_path, data)
-
-        # Restore admits the row (it carries a valid envelope and the
-        # status column has no envelope binding to fail against).
-        result = mareforma.restore(tmp_path)
-        assert result["claims_restored"] >= 1
-
-        # Now try to plant a REPLICATED-via-retracted-seed convergence.
-        # Two new agent claims cite the retracted seed; the convergence
-        # check must refuse to promote them.
-        # Sign the two downstream peers with distinct enrolled keys so the
-        # ONLY thing that can block REPLICATED is the retracted-seed anchor
-        # gate, not a same-signer collapse.
-        sa = _signing.load_private_key(ctx["root_key"])
-        sb = _signing.load_private_key(ctx["val_key"])
-        with mareforma.open(tmp_path, key_path=ctx["root_key"]) as g:
-            a = g.assert_claim(
-                "downstream A", supports=[seed_id], generated_by="A",
-                signer=sa,
-            )
-            g.assert_claim(
-                "downstream B", supports=[seed_id], generated_by="B",
-                signer=sb,
-            )
-            # Without the gate, both would be REPLICATED (distinct signers,
-            # shared anchor), the retracted seed must block it.
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-
     def test_missing_required_field_raises_restore_error(
         self, tmp_path: Path,
     ) -> None:
@@ -502,34 +453,28 @@ class TestRestoreAdversarial:
         assert exc_info.value.kind == "toml_malformed"
 
     def test_validation_envelope_swap_rejected(self, tmp_path: Path) -> None:
-        """Copy a legitimate validation envelope from one ESTABLISHED
-        claim onto a different (REPLICATED) row, set support_level to
-        ESTABLISHED. The envelope verifies cryptographically (the bytes
-        are unchanged), but its embedded claim_id no longer matches the
-        new row. Restore must catch the row-vs-envelope divergence."""
+        """Copy a legitimate validation envelope onto a row that never had
+        one. The envelope verifies cryptographically (the bytes are
+        unchanged), but its embedded claim_id no longer matches the new row.
+        Restore must catch the row-vs-envelope divergence."""
         self._setup_and_wipe(tmp_path)
         data = self._read_toml(tmp_path)
 
-        # Find a legitimate ESTABLISHED claim with a validation envelope.
+        # A claim carrying a genuine validation envelope.
         donor_id, donor = next(
             (cid, c) for cid, c in data["claims"].items()
-            if c.get("support_level") == "ESTABLISHED"
-            and c.get("validation_signature")
+            if c.get("validation_signature")
         )
         legitimate_env_json = donor["validation_signature"]
         legitimate_validated_at = donor.get("validated_at")
 
-        # Pick a different non-ESTABLISHED row as the victim. The fixture
-        # has REPLICATED claims that lack validation_signature.
+        # A row that carries none, which is what makes the copy a forgery.
         victim_id, victim = next(
             (cid, c) for cid, c in data["claims"].items()
-            if c.get("support_level") != "ESTABLISHED"
-            and cid != donor_id
+            if not c.get("validation_signature") and cid != donor_id
         )
-        # Forge: copy envelope onto victim, flip to ESTABLISHED. Match
-        # validated_at to the donor's so the timestamp check would
-        # otherwise pass, the claim_id mismatch must be what trips us.
-        victim["support_level"] = "ESTABLISHED"
+        # Match validated_at to the donor's so the timestamp check would
+        # otherwise pass: the claim_id mismatch must be what trips us.
         victim["validation_signature"] = legitimate_env_json
         victim["validated_at"] = legitimate_validated_at
         self._write_toml(tmp_path, data)

@@ -1,5 +1,5 @@
 """
-run_experiment.py — Run both MEDEA forks and record findings via mareforma.
+run_experiment.py, run both MEDEA forks and record findings via mareforma.
 
 Runs inside medea_env. Called by 05_drug_target_provenance.py --run.
 
@@ -7,7 +7,7 @@ Two forks:
   ra_cd4   Rheumatoid Arthritis  / CD4+ T cells
   sle_cd4  Systemic Lupus Erythematosus / CD4+ T cells
 
-Same model, same panelists, same debate rounds — one variable changed (the disease).
+Same model, same panelists, same debate rounds. One variable changed: the disease.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ except ImportError:
 def _require_llm_key() -> None:
     """Fail fast with a clear message when no LLM API key is set.
 
-    MEDEA hits an LLM provider on the first agent step — without a key
+    MEDEA hits an LLM provider on the first agent step, and without a key
     the failure happens deep inside the model client with an
     unhelpful traceback. Surface the problem here, before the heavy
     MEDEA import (torch / transformers / etc.) is even paid for.
@@ -81,9 +81,9 @@ def _run_medea_fork(disease: str, cell_type: str) -> dict:
     """Run one MEDEA fork and return its output dict.
 
     Returns dict with keys:
-      final_hypothesis : str  — the final drug target text
-      generated_code   : str | None — the data query code MEDEA generated
-      executed_output  : str | None — the actual output of running that code
+      final_hypothesis : str        the final drug target text
+      generated_code   : str | None the data query code MEDEA generated
+      executed_output  : str | None the actual output of running that code
     """
     agent = MEDEA(disease=disease, cell_type=cell_type)
     result = agent.run()
@@ -106,20 +106,20 @@ def _classify(result: dict) -> str:
 def main() -> None:
     with mareforma.open(HERE) as graph:
         # -------------------------------------------------------------------
-        # Query-before-assert: check for prior REPLICATED findings
+        # Query-before-assert: check for prior findings
         # -------------------------------------------------------------------
 
-        prior = graph.query("drug target", min_support="REPLICATED")
+        prior = [c for c in graph.query("drug target")]
         if prior:
-            print(f"\nFound {len(prior)} prior REPLICATED finding(s) — MEDEA will build on them.")
+            print(f"\nFound {len(prior)} prior finding(s). MEDEA will build on them.")
         else:
-            print("\nNo prior REPLICATED findings — running both forks fresh.")
+            print("\nNo prior findings, running both forks fresh.")
 
         # -------------------------------------------------------------------
         # Fork 1: Rheumatoid Arthritis, CD4+ T cells
         # -------------------------------------------------------------------
 
-        print("\n[1/2] Running MEDEA — Rheumatoid Arthritis / CD4+ T cells ...")
+        print("\n[1/2] Running MEDEA, Rheumatoid Arthritis / CD4+ T cells ...")
         ra_result = _run_medea_fork(disease="rheumatoid arthritis", cell_type="CD4")
         ra_classification = _classify(ra_result)
         print(f"  Classification: {ra_classification}")
@@ -137,7 +137,7 @@ def main() -> None:
         # Fork 2: Systemic Lupus Erythematosus, CD4+ T cells
         # -------------------------------------------------------------------
 
-        print("\n[2/2] Running MEDEA — Systemic Lupus Erythematosus / CD4+ T cells ...")
+        print("\n[2/2] Running MEDEA, Systemic Lupus Erythematosus / CD4+ T cells ...")
         sle_result = _run_medea_fork(disease="systemic lupus erythematosus", cell_type="CD4")
         sle_classification = _classify(sle_result)
         print(f"  Classification: {sle_classification}")
@@ -161,18 +161,18 @@ def main() -> None:
         print("\n" + "=" * 60)
         print("EPISTEMIC STATUS")
         print("=" * 60)
-        print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['support_level']}")
-        print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['support_level']}")
+        print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['claim_id'][:8]}")
+        print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['claim_id'][:8]}")
 
         if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
             print("\n  ⚠  One or both forks returned null generated_code.")
-            print("     Both findings are INFERRED — the data pipeline did not run.")
+            print("     Both findings are INFERRED, the data pipeline did not run.")
             print("     This was Case B in the original run. See the README for context.")
         else:
             print("\n  ✓  Both forks ran the data pipeline (ANALYTICAL).")
-            print("     Both stay PRELIMINARY: they share one signing key and")
-            print("     cite no upstream, so neither is an independent line for")
-            print("     the other. See the README for the promotion gate.")
+            print("     Neither is an independent line for the other: they")
+            print("     share one signing key and cite no common upstream.")
+            print("     See the README for what independence needs.")
 
     print(f"\nClaims written to: {HERE / 'claims.toml'}")
     print("Run 'mareforma status' for the full epistemic dashboard.")

@@ -10,6 +10,27 @@ Separated from the live-write path (``db/core.py``) because restore
 is a one-shot disaster-recovery operation with a distinct invariant
 set (the rebuild proves "what was signed is what was written") while
 the live path proves "what is being written is being signed."
+
+What the file's own account of itself is worth
+----------------------------------------------
+Every signature in a backup is verified, and that half holds against anybody:
+a forged claim, a stapled envelope or a rewritten signed field is refused
+however carefully the file was edited around it.
+
+The ``[completeness]`` table is a different instrument and a weaker one. It
+records what the file holds, so that a file which no longer holds it says so:
+row counts per section, the verdict chain's tip, how many links cover it, and
+a digest over everything above the table. That catches an edit that removes or
+adds rows and leaves the table behind, which is what a careless edit, a
+truncated copy or a partial transfer looks like.
+
+It does not withstand somebody who rewrites the table to match. Recomputing it
+is free, and nothing signs it. A deliberate editor who takes a verdict out and
+recomputes the counts, the chain fields and the digest leaves a file this
+module accepts, and the claim that verdict invalidated comes back clean. That
+is a known bound, not an oversight: the table is a witness against accident,
+and the signatures are the witness against intent. A whole-file signature over
+``claims.toml`` is what would close it, and there is none.
 """
 
 from __future__ import annotations
@@ -29,9 +50,8 @@ from .errors import (
     VerdictIssuerError,
 )
 from .core import (
+    _verdict_chain_completeness,
     open_db,
-    _CorroborationIndex,
-    _promotion_window,
     _compute_prev_hash,
     _is_claim_id,
     _refuse_llm_contradiction_issuer,
@@ -321,8 +341,252 @@ def _disclose_a_rotated_copy_worth_trying(conn, toml_path) -> "tuple[str, ...]":
     return (reason,)
 
 
+# What a backup saying this about itself costs it. The release that wrote these
+# artifacts only disclosed them, because the population it could have refused
+# was still holding files written before the format and refusing them would have
+# taken their recovery away for a rule they never had. That window is closed,
+# and a witness nobody acts on is a witness nobody needs.
+#
+# The accounting, not the bytes. A file cannot account for itself when its own
+# counts are missing, unreadable, or disagree with what it holds, or when it
+# carries something the counts never named. Those are all statements about the
+# ledger.
+#
+# `digest_mismatch` is deliberately not among them. It says the bytes changed
+# while the ledger still adds up, and the table's contract has always been that
+# it makes careless editing visible rather than refusing it: it is not a
+# signature, anyone recomputes it in a line, and the file says so. Refusing on
+# it would turn every operator who repaired a corrupt row by hand away from
+# their own graph, on the one path they reach when everything else is already
+# gone, and would still not stop anyone who spent the line.
+_UNACCOUNTED = frozenset({
+    "completeness_absent", "content_below_table", "tail_unparseable",
+    "row_counts_absent", "row_count_not_a_number", "section_not_declared",
+    "section_count_mismatch",
+    # The verdict chain says three things about itself and they are held to the
+    # same bar as the row counts: a file that does not hold what it says it
+    # holds is refused, whichever half of the table said it.
+    "verdict_chain_mismatch", "verdict_chain_count_not_a_number",
+})
+
+
+def _refuse_a_grounding_axis_nothing_attests(
+    conn, toml_path, trusted: bool,
+) -> None:
+    """Stop a restore that would put a GROUNDED axis back on a producer's word.
+
+    The write path refuses to take that axis on trust: a verdict the process's
+    own observer minted is kept, and anything else is marked declared and its
+    GROUNDED neutralised to OPAQUE. Restore never passed through it, so a
+    neutralised record could be exported, edited, re-signed with the producer's
+    own enrolled key and restored as GROUNDED, with verify exiting 0 and the
+    trust map printing the attacker's sentence as its residual. Every signature
+    checked out, because the producer was signing their own claim.
+
+    The attestation is what carries the write path's knowledge into the file, so
+    a GROUNDED axis with nothing attesting it is a GROUNDED axis this graph
+    never watched being earned.
+
+    A backup written before the attestations existed carries none, and every
+    GROUNDED claim in it would read as laundered, so that history needs a way
+    through. It used to be read off the file: no ``backup_format`` key meant a
+    backup too old to judge, and the check stood down. But that key is unsigned
+    and sits in the file the forger is editing, under a digest that is
+    deliberately not authoritative, so deleting three lines turned the refusal
+    off. The forgery did not even have to know this existed, since a hand
+    written claims.toml would likely omit them anyway.
+
+    So the way through is the operator's word instead of the file's. Every other
+    refusal here makes them say it out loud, and this one now does too.
+
+    This raises the cost of the lazy forgery, the one that edits the axis and
+    nothing else. It does not beat the producer: the observer runs inside their
+    process and they hold the key, so they can mint an attestation as readily as
+    a claim. Parity with the write path is the whole of what it buys.
+    """
+    if trusted:
+        return
+    from mareforma.db.core import grounding_attestation_state
+
+    laundered = []
+    for row in conn.execute(
+        "SELECT claim_id, observed_grounding FROM claims "
+        "WHERE observed_grounding IS NOT NULL ORDER BY rowid"
+    ).fetchall():
+        record = _parse_observed_grounding(row["observed_grounding"])
+        if not record or record.get("grounding") != "GROUNDED":
+            continue
+        if grounding_attestation_state(conn, row["claim_id"]) != "attested":
+            laundered.append(row["claim_id"])
+    if not laundered:
+        return
+    raise RestoreError(
+        f"{len(laundered)} claim(s) in {toml_path} carry a GROUNDED axis that "
+        "nothing in the file attests, starting with "
+        f"{laundered[0]}. The write path only records that axis when its own "
+        "observer minted the verdict, so an axis arriving without the "
+        "attestation beside it was put there afterwards, and restoring it would "
+        "make this graph say execution was watched when no record of watching "
+        "came with it. Nothing has been changed and the file is untouched. A "
+        "backup written before this release recorded attestations carries none "
+        "either, and reads the same way from here. If this is such a backup, or "
+        "you edited it deliberately, pass trust_unaccounted_backup=True to "
+        "restore it as it stands.",
+        kind="grounding_unattested",
+    )
+
+
+def _refuse_a_chain_the_writer_cut_short(
+    toml_path, data: dict, trusted: bool,
+) -> int:
+    """Stop a recovery from a backup the writer could not write in full.
+
+    The writer stops at the first link that does not follow the one before it,
+    so a graph somebody wrecked backs up as the part of its chain that still
+    holds. Handing that back quietly is the hole: one row put into the chain
+    below the numbering, which needs no key and no write guard removed, makes
+    every later backup carry no chain at all, and a backup with verdicts and no
+    chain is indistinguishable from one written before the chain existed. That
+    file restored clean, and the verdict it was missing went unremarked.
+
+    So a file that says it is short is refused, and what the operator does next
+    is theirs to choose. Taking the override gives back a graph whose chain
+    holds rather than the wreckage, which is the half of this worth having.
+
+    A file whose count has been stripped is a file that says nothing, and this
+    cannot tell it from an honest one. Neither can anything else here: the
+    count sits under the digest, and the digest is not a signature.
+
+    Returns the number of links left out, for the caller's report.
+    """
+    withheld = data.get("verdict_chain_withheld")
+    if not isinstance(withheld, int) or isinstance(withheld, bool) or withheld < 1:
+        return 0
+    if trusted:
+        return withheld
+    because = data.get("verdict_chain_withheld_because")
+    said = f" The writer stopped because {because}." if isinstance(because, str) and because else ""
+    links = "link" if withheld == 1 else "links"
+    raise RestoreError(
+        f"{toml_path} was written from a graph whose verdict chain stopped "
+        f"forming a chain, so it carries the chain up to that point and leaves "
+        f"{withheld} {links} out.{said} A chain this short does not account "
+        "for the verdicts in the file, and a verdict taken out of one leaves a "
+        "graph that never had it. Nothing has been changed and the file is "
+        "untouched. The graph this was written from still holds every link and "
+        "still reports them on every read, so look there for what went wrong. "
+        "To rebuild from the part that holds, which is a working graph shorter "
+        "than the one backed up, pass trust_unaccounted_backup=True.",
+        kind="verdict_chain_cut_short",
+    )
+
+
+def _refuse_a_broken_verdict_chain(
+    reasons: "tuple[str, ...]", conn, toml_path, trusted: bool,
+) -> None:
+    """Stop a recovery whose restored verdict set does not add up.
+
+    This is the half of drop-guard-delete-verdict that survives everything
+    else. The guard reconciler and the contestation replay both speak about
+    rows that are still there, so a verdict deleted out of a backup used to
+    rebuild a graph that never had it and report clean. The chain is what makes
+    the absence speak, and refusing on it is what stops the absence being
+    rebuilt.
+
+    A graph whose verdicts all predate the chain is not this. Those carry no
+    links, the chain covers a suffix that begins where it begins, and the check
+    reports nothing. Every backup written before the chain existed lands there.
+    """
+    if not reasons or trusted:
+        return
+    from mareforma.db.core import verdict_chain_coverage, verify_verdict_chain
+
+    problems = verify_verdict_chain(conn)
+    covered, total = verdict_chain_coverage(conn)
+    raise RestoreError(
+        f"the verdict chain in {toml_path} does not account for the verdicts "
+        f"it restored, holding {covered} links over {total} verdicts: "
+        + "; ".join(problems[:3])
+        + (f", and {len(problems) - 3} more" if len(problems) > 3 else "")
+        + ". A verdict taken out of a backup leaves a graph that never had it "
+        "and nothing later can tell, which is the reason the chain is written "
+        "at all. Nothing has been changed and the file is untouched. If you "
+        "edited it deliberately, pass trust_unaccounted_backup=True to restore "
+        "it as it stands.",
+        kind="verdict_chain_broken",
+    )
+
+
+def _refuse_a_file_that_cannot_account_for_itself(
+    reasons: "tuple[str, ...]", toml_path, trusted: bool,
+) -> None:
+    """Stop a recovery from a backup whose own account of itself does not hold.
+
+    A file that predates the format says nothing and reaches none of this, which
+    is what keeps every backup anyone is already holding restorable.
+
+    The override exists because this is the recovery path and its threat model
+    includes an operator who repaired a corrupt row by hand. Refusing them their
+    own graph over an edit they made deliberately would be the failure this
+    guards against, in the other direction. So the refusal names the flag, the
+    way the version gate names the upgrade, and taking it is a decision somebody
+    made rather than a default nobody saw.
+    """
+    fatal = sorted(set(reasons) & _UNACCOUNTED)
+    # Everything the file said about itself, in both refusals. Naming only the
+    # first was the shape that let one character reroute a truncated backup to
+    # a reassuring sentence one layer up, and a refusal that reports the
+    # newer format and swallows the missing rows is the same mistake wearing
+    # an exception. Whichever refusal fires, it carries the whole list.
+    also = f" It also reports: {', '.join(fatal)}." if fatal else ""
+    # Refused for the reason the graph's own version gate refuses a newer file:
+    # a reader that cannot say what a file owes cannot say it is intact either.
+    # Not a member of the set above, and the override does not reach it, because
+    # upgrading is the answer and overriding is not.
+    if "format_ahead" in reasons:
+        raise RestoreError(
+            f"claims.toml at {toml_path} was written in a backup format later "
+            "than this release understands, so what it holds cannot be checked "
+            "here and a restore from it could be missing whatever this release "
+            f"does not know to read.{also} Nothing has been changed. Do not "
+            "delete it. Restore it with the release that wrote it.",
+            kind="format_ahead",
+        )
+    if not fatal or trusted:
+        return
+    raise RestoreError(
+        f"claims.toml at {toml_path} cannot account for itself: "
+        + ", ".join(fatal)
+        + ". The file says what it should hold and does not hold it, so a graph "
+        "rebuilt from it would be missing rows with nothing recording that they "
+        "were ever there. Nothing has been changed and the file is untouched. "
+        "If you edited it deliberately, pass trust_unaccounted_backup=True to "
+        "restore it as it stands.",
+        kind="backup_unaccounted",
+    )
+
+
+def _refusal_is_coming(reasons, override_absent: bool) -> bool:
+    """Whether the caller is actually about to be refused.
+
+    The override flag alone does not decide it. Only a reason in
+    :data:`_UNACCOUNTED` is fatal, and ``digest_mismatch`` deliberately is not:
+    the completeness table's contract is to make a careless edit visible rather
+    than to refuse it. Reading the flag alone told an operator "Nothing has
+    been restored" over a restore that went on to rebuild the graph, which is a
+    false sentence in the one message they were meant to act on.
+
+    ``format_ahead`` refuses whatever the override says, because upgrading is
+    the answer and overriding is not.
+    """
+    reasons = set(reasons)
+    if "format_ahead" in reasons:
+        return True
+    return override_absent and bool(reasons & _UNACCOUNTED)
+
+
 def _disclose_a_file_that_disagrees_with_itself(
-    toml_path, data: dict,
+    toml_path, data: dict, will_refuse: bool = False,
 ) -> "tuple[str, ...]":
     """Say so when the backup does not match the ``[completeness]`` table it
     carries.
@@ -366,7 +630,8 @@ def _disclose_a_file_that_disagrees_with_itself(
     say: ``completeness_absent``, ``format_ahead``, ``digest_mismatch``,
     ``content_below_table``, ``tail_unparseable``, ``row_counts_absent``,
     ``row_count_not_a_number``, ``section_not_declared``,
-    ``section_count_mismatch``.
+    ``section_count_mismatch``, ``verdict_chain_mismatch``,
+    ``verdict_chain_count_not_a_number``.
     Tokens rather than the sentences, because these are what a caller that
     refuses would have to select on, and not all of them should be fatal: a
     hand-repaired file has to stay recoverable, and ``format_ahead`` is a
@@ -444,8 +709,11 @@ def _disclose_a_file_that_disagrees_with_itself(
                 )
             warnings.warn(
                 f"claims.toml at {toml_path} {detail}. Nothing here can account "
-                "for what the file should hold. The restored graph is what "
-                "survived. Take the backup again.",
+                "for what the file should hold. "
+                + ("Nothing has been restored."
+                   if _refusal_is_coming(reasons, will_refuse)
+                   else "The restored graph is what survived.")
+                + " Take the backup again.",
                 UserWarning,
                 stacklevel=4,
             )
@@ -515,6 +783,35 @@ def _disclose_a_file_that_disagrees_with_itself(
             + " below the completeness table, where nothing the table says "
             "reaches them"
         )
+    # The three fields the writer stores about the verdict chain, held against
+    # the chain the file actually carries. The writer measures all three from
+    # the file (see _backup_claims_toml), so a file that still holds what it was
+    # written with agrees with them, and one whose verdicts were lifted out does
+    # not. This is the erased-contradiction edit: take a verdict and its chain
+    # link, and the claim it invalidated comes back clean, with the graph
+    # reporting nothing.
+    #
+    # It is not a deliberate-editor guard and does not pretend to be. Somebody
+    # who recomputes the whole table defeats it, exactly as they defeat the row
+    # counts beside it. What it closes is the edit that removes rows and leaves
+    # the table, which is the boundary this file is written to.
+    for field, held in _verdict_chain_completeness(data).items():
+        if field not in declared:
+            continue          # a file written before the field existed
+        said = declared[field]
+        if isinstance(said, bool) or not isinstance(said, type(held)):
+            reasons.append("verdict_chain_count_not_a_number")
+            complaints.append(
+                f"the completeness table's {field} is not the kind of value "
+                "this format writes there"
+            )
+        elif said != held:
+            reasons.append("verdict_chain_mismatch")
+            complaints.append(
+                f"[completeness] says {field} is {said!r} and the file carries "
+                f"{held!r}"
+            )
+
     sections = declared.get("sections")
     if isinstance(sections, dict):
         for name, count in sorted(sections.items()):
@@ -564,9 +861,11 @@ def _disclose_a_file_that_disagrees_with_itself(
         closing = (
             "The restored graph is what the file held."
             if reasons == ["format_ahead"]
-            else "The restored graph is what the file holds, not what it claims "
-                 "to hold. Take the backup again if this was not a deliberate "
-                 "edit."
+            else ("Nothing has been restored."
+                  if _refusal_is_coming(reasons, will_refuse)
+                  else "The restored graph is what the file holds, not what it "
+                       "claims to hold.")
+                 + " Take the backup again if this was not a deliberate edit."
         )
         warnings.warn(
             f"claims.toml at {toml_path} {opening}: "
@@ -584,6 +883,7 @@ def restore(
     claims_toml: Path | str | None = None,
     rekor_log_pubkey_pem: bytes | None = None,
     enforce_rekor_policy: bool = False,
+    trust_unaccounted_backup: bool = False,
 ) -> dict:
     """Rebuild a fresh graph.db from claims.toml.
 
@@ -637,7 +937,8 @@ def restore(
     Returns
     -------
     dict
-        ``{"validators_restored": N, "claims_restored": M}``.
+        ``{"validators_restored": N, "claims_restored": M,
+        "unsigned_in_signed_mode": U, "verdict_chain_withheld": W}``.
 
     Raises
     ------
@@ -698,11 +999,21 @@ def restore(
     # After the shape check, because that is what makes a named section safe to
     # measure: before it, a section holding a scalar turned the length below
     # into a TypeError and left the documented RestoreError contract.
-    # The complaints are returned rather than only warned, so a test can
-    # ask directly. Putting them in the report dict is a wider public shape
-    # than this release should take: two tests compare that dict for exact
-    # equality, which is the contract saying it is closed.
-    _disclose_a_file_that_disagrees_with_itself(toml_path, data)
+    # Disclosed here and refused further down, after every row has been
+    # verified. Refusing at this point made "cannot account for itself" the
+    # answer to a tampered signature, a swapped statement id and an orphan
+    # signer alike, because editing any of them also breaks the digest. The
+    # precise violation is the more useful sentence and it wins; this one is
+    # for the file that is short and otherwise honest.
+    # Told whether the caller is about to be refused, so the sentence it ends
+    # on is true. The disclosure runs early and the refusal lands after every
+    # row has verified, so on the default path an operator read "the restored
+    # graph is what survived" and then an exception saying nothing had been
+    # restored. Measured, on both refusals. The first thing they read was the
+    # false one.
+    _unaccounted = _disclose_a_file_that_disagrees_with_itself(
+        toml_path, data, will_refuse=not trust_unaccounted_backup,
+    )
     # [project_policy] holds fields, not rows, so only the section shape is
     # checked; _required_field reports a missing or malformed field.
     _validate_section_shape(
@@ -902,7 +1213,11 @@ def restore(
                 c_created_at = _required_field(c, "created_at", ctx_c)
                 c_updated_at = _required_field(c, "updated_at", ctx_c)
                 c_status = _required_field(c, "status", ctx_c)
-                target_level = _required_field(c, "support_level", ctx_c)
+                # ``support_level`` is not read. A file written before the
+                # ladder was removed still carries one, and restoring such a
+                # file is the whole point of keeping the reader tolerant: the
+                # word is ignored rather than required, so an older backup
+                # restores and a newer one that never had the key restores too.
                 _verify_claim_signatures_on_restore(
                     conn, claim_id, c, validators_section, signed_mode,
                     _signing, unsigned_in_signed_mode,
@@ -968,37 +1283,29 @@ def restore(
                     _extract_validation_signer_keyid(val_sig)
                     if val_sig else None
                 )
-                # The INSERT trigger only accepts PRELIMINARY or
-                # ESTABLISHED as initial values, REPLICATED is reached
-                # via the convergence detection path inside add_claim,
-                # never as a born state. Restore inserts REPLICATED rows
-                # as PRELIMINARY first, then UPDATEs into REPLICATED.
-                # The UPDATE trigger accepts PRELIMINARY → REPLICATED.
-                insert_level = (
-                    "PRELIMINARY" if target_level == "REPLICATED"
-                    else target_level
-                )
-                # ESTABLISHED rows born here carry validation_signature
-                # (the CHECK constraint and the INSERT trigger both
-                # require it). PRELIMINARY-during-promotion rows must
-                # NOT carry validated_by / validated_at, the INSERT
-                # trigger refuses that combination. We hold those
-                # back to the UPDATE phase below for REPLICATED.
-                insert_validated_by = (
-                    c.get("validated_by") if insert_level == "ESTABLISHED"
-                    else None
-                )
-                insert_validated_at = (
-                    c.get("validated_at") if insert_level == "ESTABLISHED"
-                    else None
-                )
-                insert_validation_signature = (
-                    val_sig if insert_level == "ESTABLISHED" else None
-                )
-                insert_validator_keyid = (
-                    validator_keyid if insert_level == "ESTABLISHED"
-                    else None
-                )
+                # The validation fields go in together or not at all, and a
+                # file that carries one without the other is refused rather
+                # than tidied. Dropping the name quietly would restore a claim
+                # somebody was told had been validated as one nobody had
+                # signed off on, and every other disagreement in this file is
+                # reported rather than edited away.
+                if not val_sig and (
+                    c.get("validated_by") or c.get("validated_at")
+                ):
+                    raise RestoreError(
+                        f"claim {claim_id} says a human validated it "
+                        f"({c.get('validated_by') or c.get('validated_at')!r}) "
+                        "and carries no validation envelope to prove one did. "
+                        "A validation nobody signed is not a validation, so "
+                        "this cannot be rebuilt as written. Nothing has been "
+                        "changed. Remove the field or restore the envelope "
+                        "beside it.",
+                        kind="claim_unverified",
+                    )
+                insert_validated_by = c.get("validated_by") if val_sig else None
+                insert_validated_at = c.get("validated_at") if val_sig else None
+                insert_validation_signature = val_sig
+                insert_validator_keyid = validator_keyid if val_sig else None
                 # Denormalize ev_* from the canonical evidence_dict so
                 # the row's CHECK constraints + the evidence_json blob
                 # stay aligned. statement_cid is rebuilt from the same
@@ -1076,7 +1383,7 @@ def restore(
                     conn.execute(
                         """
                         INSERT INTO claims
-                            (claim_id, text, classification, support_level,
+                            (claim_id, text, classification,
                              idempotency_key, validated_by, validated_at,
                              status, source_name, generated_by,
                              supports_json, contradicts_json,
@@ -1088,17 +1395,15 @@ def restore(
                              ev_risk_of_bias, ev_inconsistency,
                              ev_indirectness, ev_imprecision, ev_pub_bias,
                              evidence_json, statement_cid,
-                             convergence_retry_needed,
                              predicate_payload, original_signature_bundle,
                              observed_grounding,
                              created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                ?, ?, ?, ?, ?, ?, ?, ?)
+                                ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             claim_id, c_text, c_classification,
-                            insert_level,
                             c.get("idempotency_key"),
                             insert_validated_by, insert_validated_at,
                             c_status, c.get("source_name"),
@@ -1137,7 +1442,6 @@ def restore(
                             ),
                             evidence_json_str,
                             statement_cid_str,
-                            1 if c.get("convergence_retry_needed") else 0,
                             _restore_predicate_payload(c, claim_id),
                             _restore_original_signature_bundle(c, claim_id),
                             _serialize_observed_grounding(observed_grounding),
@@ -1145,35 +1449,15 @@ def restore(
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
-                    # Trigger refusals (illegal initial support_level,
-                    # ESTABLISHED without validation_signature) and CHECK
-                    # violations (bad classification / support_level /
-                    # status enum, duplicate prev_hash) all surface here.
+                    # Trigger refusals, CHECK violations (a validator named
+                    # with no envelope, a bad classification or status enum,
+                    # a duplicate prev_hash) all surface here.
                     # Translate to RestoreError so callers honour the
                     # documented contract.
                     raise RestoreError(
                         f"Claim {claim_id} could not be restored: {exc}",
                         kind="claim_unverified",
                     ) from exc
-                if target_level == "REPLICATED":
-                    # PRELIMINARY → REPLICATED, the UPDATE trigger
-                    # accepts the transition. No validation_signature
-                    # required on REPLICATED rows. Wrap the UPDATE so
-                    # any trigger refusal surfaces as RestoreError.
-                    try:
-                        with _promotion_window(conn):
-                            conn.execute(
-                                "UPDATE claims SET support_level = 'REPLICATED' "
-                                "WHERE claim_id = ?",
-                                (claim_id,),
-                            )
-                    except sqlite3.IntegrityError as exc:
-                        raise RestoreError(
-                            f"Claim {claim_id} promote-to-REPLICATED "
-                            f"refused: {exc}",
-                            kind="claim_unverified",
-                        ) from exc
-
             # Verdict-table replay. Each verdict envelope carries its
             # own signature binding; we verify before INSERT. The
             # contradiction trigger fires on the contradiction INSERT
@@ -1208,10 +1492,27 @@ def restore(
 
             # The verdict-set chain, after the verdicts its links cover.
             _replay_verdict_chain(conn, data.get("verdict_chain") or {})
-            _disclose_a_rotated_copy_worth_trying(conn, toml_path)
+            chain_withheld = _refuse_a_chain_the_writer_cut_short(
+                toml_path, data, trust_unaccounted_backup,
+            )
+            _refuse_a_broken_verdict_chain(
+                _disclose_a_rotated_copy_worth_trying(conn, toml_path),
+                conn, toml_path, trust_unaccounted_backup,
+            )
+            # Every row has verified by here, so anything left is the
+            # file disagreeing with its own account rather than a row
+            # disagreeing with its signature.
+            _refuse_a_file_that_cannot_account_for_itself(
+                _unaccounted, toml_path, trust_unaccounted_backup,
+            )
             # The grounding attestations, after the claims they name.
             _replay_grounding_attestations(
                 conn, data.get("grounding_attestations") or {},
+            )
+            # After the attestations, so the axis is judged against what the
+            # file actually carried for it.
+            _refuse_a_grounding_axis_nothing_attests(
+                conn, toml_path, trust_unaccounted_backup,
             )
             # What the source graph had seen missing. Carried so a round trip
             # cannot be the thing that forgets it.
@@ -1379,19 +1680,13 @@ def restore(
 
             # Refuse a finding attached to a proposition its claim never made.
             # The edge itself is unsigned, so it is re-derived from the claim's
-            # signed text, the same posture as the REPLICATED re-derivation below.
+            # signed text, the same posture as the re-derivations below.
             _verify_finding_proposition_binding(conn)
 
             # Refuse a recovery whose gate inputs a later read would silently
             # drop, running the one verifier the live read path uses so both
             # paths agree on the same graph.
             _verify_gate_inputs_reconstruct(conn)
-
-            # Refuse a REPLICATED level no distinct-signer corroboration backs.
-            # support_level is not signed, so this runs after the full graph +
-            # verdicts are in place and re-derives the promotion invariant from
-            # signed material (supports edges + verified asserter identities).
-            _verify_replicated_corroboration(conn)
 
             conn.execute("COMMIT")
         except Exception:
@@ -1447,6 +1742,7 @@ def restore(
             "validators_restored": len(ordered_validators),
             "claims_restored": len(ordered_claims),
             "unsigned_in_signed_mode": len(unsigned_in_signed_mode),
+            "verdict_chain_withheld": chain_withheld,
         }
     except BaseException:
         # Close first so the files are unlocked, then drop the residue.
@@ -1697,57 +1993,6 @@ def _verify_gate_inputs_reconstruct(conn: sqlite3.Connection) -> None:
             verify_gate_inputs_or_refuse(conn, r["content_id"], cache=cache)
         except GateInputRefused as exc:
             raise RestoreError(str(exc), kind="claim_unverified") from exc
-
-
-def _verify_replicated_corroboration(conn: sqlite3.Connection) -> None:
-    """Refuse a restored promotion no signed evidence backs.
-
-    ``support_level`` is not a signed field, so a tampered claims.toml can flip
-    a lone PRELIMINARY claim to REPLICATED while its signature still verifies.
-    :class:`_CorroborationIndex` re-derives the rung from signed material, the
-    same rule the live read path applies before it serves a row; here an
-    unbacked row fails the whole restore rather than degrading one read.
-
-    A project whose root-signed policy requires strict promotion is held to it
-    here too: a claim created after that declaration must carry data, and so
-    must the peer backing it. Claims created before the declaration keep their
-    level, the policy is not retroactive, and both timestamps are signed so the
-    grandfathering window cannot be widened, neither by editing the backup nor
-    by declaring a second, unrelated rule later.
-    """
-    rows = conn.execute(
-        "SELECT claim_id, support_level, asserter_keyid, supports_json, "
-        "artifact_hash, observed_grounding, transparency_logged, "
-        "created_at, validation_signature FROM claims "
-        "WHERE support_level IN ('REPLICATED', 'ESTABLISHED')"
-    ).fetchall()
-    if not rows:
-        return
-    index = _CorroborationIndex(conn, {})
-    for r in rows:
-        failure = index.failure(r)
-        if failure is None:
-            continue
-        if failure == "strict_promotion_without_data":
-            raise RestoreError(
-                f"Claim {r['claim_id']} is stored as {r['support_level']} with "
-                "no artifact_hash, which this project's root-signed "
-                "strict-promotion policy forbids for a claim created after "
-                "the declaration.",
-                kind="policy_violation",
-            )
-        raise RestoreError(
-            f"Claim {r['claim_id']} is stored as {r['support_level']} but no "
-            "distinct-signer corroboration on a shared ESTABLISHED anchor "
-            "backs the REPLICATED rung it stands on: a peer "
-            "must carry a different artifact hash, and neither side may "
-            "carry a non-promoting grounding verdict. A replication verdict "
-            "naming the claim does not settle it either: a verdict names "
-            "every member of its cluster and promotes only the qualifying "
-            "ones. The support level is not a signed field; this one is "
-            "unverifiable and the backup may be tampered.",
-            kind="claim_unverified",
-        )
 
 
 def _gate_replayed_verdict_issuer(
@@ -2633,8 +2878,7 @@ def _verify_claim_signatures_on_restore(
                 kind="claim_unverified",
             ) from exc
         # The validation_signature column carries either a validation
-        # envelope (REPLICATED→ESTABLISHED promotion) or a seed envelope
-        # (born-ESTABLISHED bootstrap). Both are legitimate; pass the
+        # envelope or a seed envelope. Both are legitimate; pass the
         # declared type back to verify_envelope so a mismatch surfaces
         # any tampering between row and column.
         if declared_type not in (
@@ -2684,9 +2928,9 @@ def _verify_claim_signatures_on_restore(
         # the embedded payload, it does NOT prove the embedded payload
         # is about THIS row. A hand-edited claims.toml could copy a
         # legitimate validation/seed envelope onto a different row;
-        # without the field-equality check the row would inherit a
-        # forged ESTABLISHED stamp anchored by a real validator
-        # signature it never authorized for that claim. Mirror the
+        # without the field-equality check the row would read as validated
+        # under a real validator signature it never authorized for that
+        # claim. Mirror the
         # SIGNED_FIELDS cross-check the signature_bundle branch does.
         try:
             val_payload = _signing.envelope_payload(val_env)
@@ -2709,14 +2953,13 @@ def _verify_claim_signatures_on_restore(
                 "validator_keyid than the signing keyid; TOML tampered.",
                 kind="claim_unverified",
             )
-        # The promotion gates the live path runs once the signer is known
-        # authentic. Both read signed material only, the claim's own
-        # signature bundle and the validator's signed enrollment, so a row
-        # that fails them here could not have been promoted there. Seed
-        # envelopes are exempt: a born-ESTABLISHED claim is attested by its
-        # own asserter by design and never climbs the ladder.
+        # The gates the live path runs once the signer is known authentic.
+        # Both read signed material only, the claim's own signature bundle and
+        # the validator's signed enrollment, so a row that fails them here
+        # could not have been written there. Seed envelopes are exempt: a
+        # seeded claim is attested by its own asserter by design.
         try:
-            # The llm ceiling applies whatever the envelope calls itself: the
+            # The llm rule applies whatever the envelope calls itself: the
             # live seed path refuses an llm signer for the same reason
             # validate_claim does, so keying the gate on the payloadType let a
             # signer pick which rule it was under.
@@ -2727,8 +2970,8 @@ def _verify_claim_signatures_on_restore(
                 sig_bundle_json
             ):
                 # A seed is exempt from the self-validation rule because a
-                # born-ESTABLISHED claim is attested by its own asserter. That
-                # is the premise, so require it rather than assume it.
+                # seeded claim is attested by its own asserter. That is the
+                # premise, so require it rather than assume it.
                 raise SelfValidationError(
                     f"seed envelope on claim '{claim_id}' is signed by "
                     f"{val_keyid[:12]}…, which signed no role on the claim; a "

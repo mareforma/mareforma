@@ -39,8 +39,9 @@ import mareforma
 from mareforma import signing
 from mareforma.db.core import grounding_attestation_state
 from mareforma.db.restore import restore
+from mareforma.db.errors import RestoreError
 from mareforma.observe import observe
-from tests._helpers import _bootstrap_key, _enroll_key, _load_signer
+from tests._helpers import rewrite_backup, _bootstrap_key, _enroll_key, _load_signer
 
 
 def _dataset(root: Path) -> Path:
@@ -131,9 +132,7 @@ def _forge_axis_in_backup(root: Path, claim_id: str, key: Path) -> None:
     claim["statement_cid"] = hashlib.sha256(
         signing.canonical_statement(fields, evidence)
     ).hexdigest()
-    toml_path.write_text(
-        tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
-    )
+    rewrite_backup(toml_path, doc)
 
 
 class TestWhoGetsOne:
@@ -200,13 +199,20 @@ class TestItSurvivesRecovery:
         assert _axis(tmp_path, key, claim_id) == "GROUNDED"
         assert _state(tmp_path, key, claim_id) == "attested"
 
-    def test_a_forged_axis_restores_unattested(self, tmp_path: Path) -> None:
-        """The regression for the laundering path, stated as the discriminator.
+    def test_a_forged_axis_is_refused(self, tmp_path: Path) -> None:
+        """The laundering path, closed.
 
-        The claim is asserted with no grounding at all, and comes back from
-        restore saying GROUNDED. That much is unchanged and is not what this
-        pins: the axis is inside the claim's signed statement and the producer
-        re-signed it. What is new is that the two are now telling apart at all.
+        The claim is asserted with no grounding at all. Its axis is edited to
+        GROUNDED in the backup and re-signed with the producer's own enrolled
+        key, so every signature checks out, because the producer is signing
+        their own claim. The release that wrote the attestations could only
+        tell the two apart on read; this one stops the restore.
+
+        What that buys is parity with the write path, which has always refused
+        to take the axis on the producer's word. It does not beat the producer:
+        the observer runs inside their process and they hold the key. The
+        override is here because it is the same file to an operator who edited
+        it on purpose.
         """
         key = _bootstrap_key(tmp_path, "root.key")
         _dataset(tmp_path)
@@ -216,8 +222,16 @@ class TestItSurvivesRecovery:
             )
         _forge_axis_in_backup(tmp_path, claim_id, key)
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
 
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "grounding_unattested"
+        assert not (tmp_path / ".mareforma").exists()
+
+        # The same file, restored by somebody who says they meant it. The axis
+        # still reads GROUNDED, and still has nothing attesting it, which is
+        # the discriminator the attestation was written for.
+        restore(tmp_path, trust_unaccounted_backup=True)
         assert _axis(tmp_path, key, claim_id) == "GROUNDED"
         assert _state(tmp_path, key, claim_id) == "unattested"
 
@@ -239,7 +253,7 @@ class TestItSurvivesRecovery:
             forged_id = g.assert_claim("a finding", classification="ANALYTICAL")
         _forge_axis_in_backup(forged_root, forged_id, forged_key)
         shutil.rmtree(forged_root / ".mareforma")
-        restore(forged_root)
+        restore(forged_root, trust_unaccounted_backup=True)
 
         assert _axis(honest_root, honest_key, honest_id) == "GROUNDED"
         assert _axis(forged_root, forged_key, forged_id) == "GROUNDED"
@@ -576,7 +590,7 @@ class TestItIsReported:
             claim_id = g.assert_claim("a finding", classification="ANALYTICAL")
         _forge_axis_in_backup(tmp_path, claim_id, key)
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         with mareforma.open(tmp_path, key_path=key) as g:
             prop = next(
@@ -676,3 +690,80 @@ class TestItDoesNotBreakTheOrdinaryCase:
         raw.commit()
         assert grounding_attestation_state(raw, claim_id) == "broken"
         raw.close()
+
+
+class TestAProjectOlderThanTheAttestations:
+    """A backup too old to attest gets through on the operator's word, not its own.
+
+    A GROUNDED axis arriving with nothing attesting it is how an axis edited
+    after the fact looks, and this release refuses it. Backups written before
+    the attestations existed carry none, so that history needs a way through.
+
+    It used to be read off the file: no ``backup_format`` key meant a backup too
+    old to judge, and the check stood down. That key is unsigned and sits in the
+    file the forger is editing, so the way through was to delete it. Forging the
+    axis and dropping three keys restored a laundered GROUNDED with no override
+    and no warning, and the forger never had to know the attestations existed.
+
+    So the file no longer gets to say. The operator does, the same way the other
+    refusals in this module make them say it.
+    """
+
+    def _a_forged_axis_in_a_backup_that_attests_nothing(
+        self, tmp_path: Path,
+    ) -> "tuple[Path, str]":
+        """The file shape both directions below are about.
+
+        The axis is edited and re-signed with the project's own enrolled key, so
+        every signature still checks out. Then the stamp, the attestations and
+        the completeness table go, which is what a backup predating any of this
+        looks like and equally what a forger would leave behind.
+        """
+        import tomli_w
+
+        key = _bootstrap_key(tmp_path, "root.key")
+        _dataset(tmp_path)
+        with mareforma.open(tmp_path, key_path=key) as g:
+            claim_id = g.assert_claim(
+                "the treatment lowers the outcome", classification="ANALYTICAL",
+            )
+        _forge_axis_in_backup(tmp_path, claim_id, key)
+
+        toml_path = tmp_path / "claims.toml"
+        doc = tomllib.loads(toml_path.read_text())
+        doc.pop("backup_format", None)
+        doc.pop("grounding_attestations", None)
+        doc.pop("completeness", None)
+        toml_path.write_text(tomli_w.dumps(doc))
+
+        shutil.rmtree(tmp_path / ".mareforma")
+        return key, claim_id
+
+    def test_dropping_the_stamp_no_longer_waves_the_axis_through(
+        self, tmp_path: Path,
+    ) -> None:
+        """The bypass: three deleted keys used to turn the refusal off."""
+        from mareforma.db.restore import RestoreError
+
+        self._a_forged_axis_in_a_backup_that_attests_nothing(tmp_path)
+
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "grounding_unattested"
+
+    def test_the_operator_can_still_restore_a_backup_that_old(
+        self, tmp_path: Path,
+    ) -> None:
+        """The half that keeps the honest history restorable.
+
+        The refusal is not a wall. It moves the decision to somebody who can
+        actually know whether the backup predates the attestations.
+        """
+        key, claim_id = self._a_forged_axis_in_a_backup_that_attests_nothing(
+            tmp_path,
+        )
+
+        restore(tmp_path, trust_unaccounted_backup=True)
+
+        assert _axis(tmp_path, key, claim_id) == "GROUNDED"
+        assert _state(tmp_path, key, claim_id) == "unattested"

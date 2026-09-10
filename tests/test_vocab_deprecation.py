@@ -6,7 +6,7 @@ number, not a single support word. CORROBORATED was the top Status verdict
 word; it is renamed to the convergence marker CONVERGENT, because distinct-model
 is necessary but not sufficient for independence, so the word over-claimed. Both
 old names keep resolving for one release and warn on read; a future release
-removes them. Neither is a schema rename: the stored ``support_level`` strings
+removes them. Neither is a schema rename: the stored strings
 and the promotion machinery are unchanged, and Status is recomputed on read, so
 no stored status string exists to migrate.
 """
@@ -50,16 +50,28 @@ def test_convergent_value_lookup_does_not_warn(recwarn) -> None:
     assert not [w for w in recwarn.list if issubclass(w.category, DeprecationWarning)]
 
 
-def test_replicated_label_deprecation_warning() -> None:
-    # Still works: each retired label resolves to its string value, so a caller
-    # reading the old public name is not broken this release...
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        replicated = mareforma.REPLICATED
-    assert replicated == "REPLICATED"
+def test_the_retired_support_labels_are_gone() -> None:
+    # They resolved to their own string for one release, with a notice saying
+    # this would happen. A caller who kept reading the old public name gets the
+    # same error as any other name the module does not have.
+    for label in ("REPLICATED", "ESTABLISHED"):
+        with pytest.raises(AttributeError, match=label):
+            getattr(mareforma, label)
 
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        established = mareforma.ESTABLISHED
-    assert established == "ESTABLISHED"
+
+def test_reading_a_retired_label_does_not_warn_instead_of_raising() -> None:
+    # A removal that still warns is a removal that did not happen. Checked
+    # apart from the raise because a warnings filter promoting DeprecationWarning
+    # to an error would make the test above pass for the wrong reason.
+    import warnings
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        try:
+            mareforma.REPLICATED
+        except AttributeError:
+            pass
+    assert seen == []
 
 
 def test_epistemic_test_names_carry_no_retired_status_label() -> None:

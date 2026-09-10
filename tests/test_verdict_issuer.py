@@ -90,8 +90,6 @@ class TestRecordReplicationVerdict:
                 confidence={"cosine": 0.92},
             )
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
             verdicts = g.replication_verdicts(member_claim_id=a)
         assert len(verdicts) == 1
         assert verdicts[0]["method"] == "semantic-cluster"
@@ -140,18 +138,29 @@ class TestRecordReplicationVerdict:
 # Verdict-path promotion gates: grounding, signer, transparency
 # ---------------------------------------------------------------------------
 
-class TestVerdictPromotionGates:
-    """The verdict path must apply the same computed gates the convergence
-    path applies to the PRELIMINARY → REPLICATED transition. An enrolled
-    issuer must not be able to launder an UNGROUNDED or unsigned claim into
-    the trust ladder."""
+# ---------------------------------------------------------------------------
+# What a replication verdict does, and what it does not
+# ---------------------------------------------------------------------------
 
-    def test_ungrounded_claim_not_promoted_by_verdict(
+class TestAVerdictIsRecordedWhateverTheClaimsAreGroundedIn:
+    """One behaviour, tested once, under the name of what it actually proves.
+
+    Three tests used to live here, named for gates on the verdict path:
+    UNGROUNDED claims held back, GROUNDED ones let through, a strict project
+    policy refusing a claim with no artifact hash. Those gates went with the
+    support ladder, and the three tests converged on asserting the same
+    surviving fact, that the verdict row is written, under three names that
+    each promised something else. One of them declared no strict policy at all
+    while its comment said the project had declared one.
+
+    Recording a verdict is not a judgement about the claims it names. What a
+    reader makes of them is derived on read, and lives in the trust-layer
+    tests.
+    """
+
+    def test_the_verdict_row_is_written_for_an_ungrounded_claim(
         self, tmp_path: Path,
     ) -> None:
-        # Execution observed 'a' as UNGROUNDED: no real data flowed. A
-        # replication verdict must not ride it into REPLICATED, while its
-        # grounded peer 'b' (NULL verdict) still promotes.
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(
             tmp_path, grounding_a={"grounding": "UNGROUNDED"},
         )
@@ -162,61 +171,18 @@ class TestVerdictPromotionGates:
                 method="semantic-cluster", confidence={},
             )
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
-            # The verdict is still recorded even though 'a' did not promote.
-            assert g.replication_verdicts(member_claim_id=a)
+            recorded = g.replication_verdicts(member_claim_id=a)
+            assert [v["verdict_id"] for v in recorded] == ["rv_ung"]
 
-    def test_opaque_claim_not_promoted_by_verdict(self, tmp_path: Path) -> None:
-        root_key, issuer_key, a, _, _, _ = _seed_two_claims(
-            tmp_path, grounding_a={"grounding": "OPAQUE"},
-        )
-        with mareforma.open(tmp_path, key_path=issuer_key) as g:
-            g.record_replication_verdict(
-                verdict_id="rv_op", cluster_id="cl_op",
-                member_claim_id=a, other_claim_id=None,
-                method="semantic-cluster", confidence={},
-            )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-
-    def test_unsigned_claim_not_promoted_by_verdict(
+    def test_the_verdict_row_is_written_for_a_grounded_claim(
         self, tmp_path: Path,
     ) -> None:
-        root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
-        # Strip 'a' of its asserter_keyid: an unsigned / legacy row is not a
-        # valid distinct signer and must not be laundered to REPLICATED. The
-        # append-only trigger guards that column, so drop it for the setup;
-        # the next open recreates it.
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g._conn.execute(
-                "DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering"
-            )
-            g._conn.execute(
-                "UPDATE claims SET asserter_keyid = NULL WHERE claim_id = ?",
-                (a,),
-            )
-            g._conn.commit()
-        with mareforma.open(tmp_path, key_path=issuer_key) as g:
-            g.record_replication_verdict(
-                verdict_id="rv_uns", cluster_id="cl_uns",
-                member_claim_id=a, other_claim_id=b,
-                method="semantic-cluster", confidence={},
-            )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
+        """The observer's own verdict, not a hand-authored one.
 
-    def test_grounded_claim_still_promoted_by_verdict(
-        self, tmp_path: Path,
-    ) -> None:
-        # A recorded GROUNDED verdict must NOT block promotion, the gate is
-        # additive, not a new hurdle for honestly grounded claims.
-        #
-        # The verdict is one the observer computed, from a scope that watched a
-        # real file be read. A hand-authored ``{"grounding": "GROUNDED"}`` is a
-        # declaration, stored as OPAQUE, so it would test the gate
-        # against a claim that is not grounded at all.
+        A hand-written ``{"grounding": "GROUNDED"}`` is a declaration and is
+        stored as OPAQUE, so it would exercise this against a claim that is not
+        grounded at all.
+        """
         import mareforma.observe as obs
         from mareforma.observe import ObservedGrounding as OG
 
@@ -225,9 +191,11 @@ class TestVerdictPromotionGates:
         with obs.observe(cites=str(dataset)) as handle:
             dataset.read_text()
         assert handle.verdict.grounding is OG.GROUNDED, handle.verdict.reason
-        record = handle.verdict.to_signed_dict()
+
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(
-            tmp_path, grounding_a=record, grounding_b=record,
+            tmp_path,
+            grounding_a=handle.verdict.to_signed_dict(),
+            grounding_b=handle.verdict.to_signed_dict(),
         )
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
@@ -236,72 +204,8 @@ class TestVerdictPromotionGates:
                 method="semantic-cluster", confidence={},
             )
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_strict_policy_blocks_hashless_promotion_by_verdict(
-        self, tmp_path: Path,
-    ) -> None:
-        # The project declared strict promotion, so a claim without an
-        # artifact_hash cannot promote. Convergence refuses the pair; an
-        # enrolled issuer's verdict must refuse it too, or the policy binds
-        # only one of the two write paths that reach the same transition.
-        root_key = _bootstrap(tmp_path, "root.key")
-        second_key = _bootstrap(tmp_path, "second.key")
-        issuer_key = _bootstrap(tmp_path, "issuer.key")
-        with mareforma.open(
-            tmp_path, key_path=root_key, strict_promotion=True,
-        ) as g:
-            _enroll_extra(g, second_key, identity="second")
-            _enroll_extra(g, issuer_key, identity="issuer")
-            anchor = g.assert_claim("anchor", seed=True)
-            a = g.assert_claim("alpha", supports=[anchor])
-        with mareforma.open(tmp_path, key_path=second_key) as g:
-            b = g.assert_claim("beta", supports=[anchor])
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(b)["support_level"] == "PRELIMINARY"
-        with mareforma.open(tmp_path, key_path=issuer_key) as g:
-            g.record_replication_verdict(
-                verdict_id="rv_strict", cluster_id="cl_strict",
-                member_claim_id=a, other_claim_id=b,
-                method="semantic-cluster", confidence={},
-            )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
-            assert g.get_claim(b)["support_level"] == "PRELIMINARY"
-            # The verdict itself is still recorded, only the promotion is held.
-            assert g.replication_verdicts(member_claim_id=a)
-
-    def test_strict_policy_still_promotes_claims_carrying_data(
-        self, tmp_path: Path,
-    ) -> None:
-        # The strict gate is data-presence, not a blanket refusal: two claims
-        # that carry distinct hashes still promote on a verdict.
-        root_key = _bootstrap(tmp_path, "root.key")
-        second_key = _bootstrap(tmp_path, "second.key")
-        issuer_key = _bootstrap(tmp_path, "issuer.key")
-        with mareforma.open(
-            tmp_path, key_path=root_key, strict_promotion=True,
-        ) as g:
-            _enroll_extra(g, second_key, identity="second")
-            _enroll_extra(g, issuer_key, identity="issuer")
-            a = g.assert_claim("alpha", artifact_hash="a" * 64)
-        with mareforma.open(tmp_path, key_path=second_key) as g:
-            b = g.assert_claim("beta", artifact_hash="b" * 64)
-        with mareforma.open(tmp_path, key_path=issuer_key) as g:
-            g.record_replication_verdict(
-                verdict_id="rv_data", cluster_id="cl_data",
-                member_claim_id=a, other_claim_id=b,
-                method="semantic-cluster", confidence={},
-            )
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert g.get_claim(a)["support_level"] == "REPLICATED"
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
-
-
-# ---------------------------------------------------------------------------
-# record_contradiction_verdict + t_invalid trigger
-# ---------------------------------------------------------------------------
+            recorded = g.replication_verdicts(member_claim_id=a)
+            assert [v["verdict_id"] for v in recorded] == ["rv_g"]
 
 class TestContradictionInvalidatesOlder:
     def test_older_claim_gets_t_invalid_set(self, tmp_path: Path) -> None:
@@ -326,9 +230,9 @@ class TestContradictionInvalidatesOlder:
                 confidence={},
             )
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            visible = [r["claim_id"] for r in g.query(include_unverified=True)]
+            visible = [r["claim_id"] for r in g.query()]
             audit = [r["claim_id"] for r in g.query(
-                include_unverified=True, include_invalidated=True,
+                include_invalidated=True,
             )]
         assert a not in visible  # invalidated
         assert a in audit
@@ -381,7 +285,7 @@ class TestLLMContradictionGate:
     it from default ``query()`` results. The human-only rule must apply
     in BOTH directions: humans-only-to-promote AND humans-only-to-demote.
     Without this gate, an enrolled LLM key could mark down any
-    human-validated ESTABLISHED claim by signing a contradiction , 
+    human-validated claim by signing a contradiction, 
     breaking the README's promotion-requires-human framing on the
     demotion side.
     """
@@ -694,12 +598,12 @@ class TestInvalidatedClaimRefusesValidation:
     """validate_claim must refuse to promote a claim that's already
     been invalidated by a signed contradiction verdict. Without this,
     an enrolled human validator could lift an already-refuted claim
-    REPLICATED → ESTABLISHED, riding past the terminal evidence of
+    a signed validation, riding past the terminal evidence of
     the signed contradiction."""
 
     def test_validate_refuses_t_invalid_claim(self, tmp_path: Path) -> None:
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(tmp_path)
-        # Promote (a, b) to REPLICATED via a replication verdict.
+        # Record a replication verdict over (a, b).
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
                 verdict_id="rv_v1", cluster_id="cl",
@@ -741,7 +645,6 @@ class TestReplicationDoesNotRePromoteInvalidated:
                 confidence={},
             )
             assert g.get_claim(a)["t_invalid"] is not None
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
         # Step 2: a replication verdict tries to promote (a, b).
         # `b` is still PRELIMINARY and not invalidated → promotes.
         # `a` is invalidated → MUST NOT promote.
@@ -751,9 +654,7 @@ class TestReplicationDoesNotRePromoteInvalidated:
                 member_claim_id=a, other_claim_id=b,
                 method="semantic-cluster", confidence={},
             )
-            assert g.get_claim(a)["support_level"] == "PRELIMINARY"
             assert g.get_claim(a)["t_invalid"] is not None
-            assert g.get_claim(b)["support_level"] == "REPLICATED"
 
 
 # ---------------------------------------------------------------------------
@@ -1176,7 +1077,7 @@ class TestVerdictIssuerGatesOnRestore:
 
 class TestRestorePreservesNonRekorTransparency:
     """A non-Rekor project's claims are transparency-ready by default
-    (transparency_logged=1); restore must preserve that so REPLICATED's
+    (transparency_logged=1); restore must preserve that so the log's
     transparency_logged=1 gate still passes after recovery. Witnessed state
     for a Rekor-enabled claim is derived from the [rekor_inclusions] sidecar,
     not the unsigned rekor block inside signature_bundle, the forge-refusal
@@ -1281,376 +1182,3 @@ class TestTheReadPathAsksEntitlementToo:
             tmp_path, peer_key, peer_keyid, claim_id,
         )
         assert self._verifies(tmp_path)
-
-    def test_an_unentitled_verdict_does_not_carry_the_level(
-        self, tmp_path: Path,
-    ) -> None:
-        """End to end: the level it would have backed is not served."""
-        root_key = _bootstrap(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            claim_id = g.assert_claim("mine alone", generated_by="r1")
-        root_keyid = _signing.public_key_id(
-            _signing.load_private_key(root_key).public_key(),
-        )
-        self._plant_replication_verdict(
-            tmp_path, root_key, root_keyid, claim_id,
-        )
-        raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
-        # Both guards an attacker with SQL access removes to get here. The
-        # census records the removal; what it does not do is undo the edit,
-        # and the verdict is what the level rests on afterwards.
-        raw.execute("DROP TRIGGER IF EXISTS claims_signed_fields_no_laundering")
-        raw.execute("DROP TRIGGER IF EXISTS claims_signed_promotion_backed")
-        raw.execute(
-            "UPDATE claims SET support_level = 'REPLICATED' WHERE claim_id = ?",
-            (claim_id,),
-        )
-        raw.commit()
-        raw.close()
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            served = g.query(min_support="REPLICATED")
-        assert claim_id not in [c["claim_id"] for c in served], (
-            "a self-issued verdict carried the level it claims to back"
-        )
-
-
-class TestTheReadPathAsksPromotionEntitlementToo:
-    """The same question on the promotion side of the ladder.
-
-    ``validate_claim`` refuses an llm-typed validator and refuses a validator
-    ratifying a claim it signed, and restore re-applies both to a replayed row
-    with a comment saying such a row "could not have been promoted" on the live
-    path. The graph.db read path applied neither, so a planted ESTABLISHED read
-    back as ratified while restore refused the same bytes. Seed envelopes stay
-    exempt: a born-ESTABLISHED claim is attested by its own asserter by design.
-    """
-
-    def _replicated_claim_asserted_by(
-        self, tmp_path: Path, root_key: Path, asserter_key: Path,
-    ) -> str:
-        """A REPLICATED claim whose asserter is *asserter_key*.
-
-        Needed to isolate the llm ceiling from the seed rule: with any other
-        asserter the seed rule refuses first, and a test that cannot tell the
-        two apart passes on a build where the ceiling is gone.
-        """
-        witness_key = _bootstrap(tmp_path, "witness2.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            _enroll_extra(g, witness_key, identity="witness2")
-            claim_id = g.assert_claim(
-                "a finding it asserted itself", generated_by="r1",
-                signer=_load_signer(asserter_key),
-            )
-        with mareforma.open(tmp_path, key_path=witness_key) as g:
-            g.record_replication_verdict(
-                verdict_id="v-honest2", cluster_id="c2",
-                member_claim_id=claim_id, other_claim_id=None,
-                method="cross-method",
-            )
-        return claim_id
-
-    def _replicated_claim(self, tmp_path: Path, root_key: Path) -> str:
-        """A claim that honestly reached REPLICATED, so the next rung is legal.
-
-        The ladder refuses PRELIMINARY straight to ESTABLISHED, and what is
-        under test is the rung above, not the transition rule.
-        """
-        witness_key = _bootstrap(tmp_path, "witness.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            _enroll_extra(g, witness_key, identity="witness")
-            claim_id = g.assert_claim("a finding", generated_by="r1")
-        with mareforma.open(tmp_path, key_path=witness_key) as g:
-            g.record_replication_verdict(
-                verdict_id="v-honest", cluster_id="c1",
-                member_claim_id=claim_id, other_claim_id=None,
-                method="cross-method",
-            )
-        return claim_id
-
-    def _plant_established(
-        self, tmp_path: Path, claim_id: str, signer_key: Path, keyid: str,
-    ) -> None:
-        import datetime as _dt
-
-        now = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
-        env = _signing.sign_validation(
-            {"claim_id": claim_id, "validator_keyid": keyid,
-             "validated_at": now, "evidence_seen": []},
-            _signing.load_private_key(signer_key),
-        )
-        raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
-        # The marker the promotion trigger looks for. A writer with SQL access
-        # opens its own window, which is why the level cannot rest on the
-        # trigger alone.
-        raw.execute("CREATE TEMP TABLE mareforma_promotion_open (x)")
-        raw.execute(
-            "UPDATE claims SET support_level='ESTABLISHED', "
-            "validation_signature=?, validator_keyid=?, validated_at=? "
-            "WHERE claim_id = ?",
-            (json.dumps(env), keyid, now, claim_id),
-        )
-        raw.commit()
-        raw.close()
-
-    def _verified(self, tmp_path: Path, claim_id: str) -> bool:
-        with mareforma.open(tmp_path, load_key=False) as g:
-            return bool(g.get_claim(claim_id)["verified"])
-
-    def test_an_llm_validator_cannot_ratify_on_read(
-        self, tmp_path: Path,
-    ) -> None:
-        root_key = _bootstrap(tmp_path, "root.key")
-        llm_key = _bootstrap(tmp_path, "llm.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(llm_key).public_key(),
-                ),
-                identity="a machine reviewer", validator_type="llm",
-            )
-        claim_id = self._replicated_claim(tmp_path, root_key)
-        self._plant_established(
-            tmp_path, claim_id, llm_key, enrolled["keyid"],
-        )
-        assert not self._verified(tmp_path, claim_id)
-
-    def test_the_asserter_cannot_ratify_its_own_claim_on_read(
-        self, tmp_path: Path,
-    ) -> None:
-        root_key = _bootstrap(tmp_path, "root.key")
-        claim_id = self._replicated_claim(tmp_path, root_key)
-        root_keyid = _signing.public_key_id(
-            _signing.load_private_key(root_key).public_key(),
-        )
-        self._plant_established(tmp_path, claim_id, root_key, root_keyid)
-        assert not self._verified(tmp_path, claim_id)
-
-    def _plant_seed_envelope(
-        self, tmp_path: Path, claim_id: str, signer_key: Path, keyid: str,
-    ) -> None:
-        """The same plant, with the envelope calling itself a seed."""
-        import datetime as _dt
-
-        now = _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
-        env = _signing.sign_seed_claim(
-            {"claim_id": claim_id, "validator_keyid": keyid, "seeded_at": now},
-            _signing.load_private_key(signer_key),
-        )
-        raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
-        raw.execute("CREATE TEMP TABLE mareforma_promotion_open (x)")
-        raw.execute(
-            "UPDATE claims SET support_level='ESTABLISHED', "
-            "validation_signature=?, validator_keyid=?, validated_at=? "
-            "WHERE claim_id = ?",
-            (json.dumps(env), keyid, now, claim_id),
-        )
-        raw.commit()
-        raw.close()
-
-    def test_calling_the_envelope_a_seed_does_not_lift_the_llm_ceiling(
-        self, tmp_path: Path,
-    ) -> None:
-        """The signer picks the payloadType, so it cannot pick the rule.
-
-        The write path refuses an llm signer on the seed path in as many words,
-        because otherwise an llm validator routes around the ESTABLISHED
-        ceiling by seeding instead of validating. A read that applied the
-        ceiling only to validation envelopes took the signer's word for which
-        rule it was under.
-        """
-        root_key = _bootstrap(tmp_path, "root.key")
-        llm_key = _bootstrap(tmp_path, "llm.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(llm_key).public_key(),
-                ),
-                identity="a machine reviewer", validator_type="llm",
-            )
-        # The llm key asserts the claim itself, so the seed rule is satisfied
-        # and only the ceiling can refuse it.
-        claim_id = self._replicated_claim_asserted_by(
-            tmp_path, root_key, llm_key,
-        )
-        self._plant_seed_envelope(
-            tmp_path, claim_id, llm_key, enrolled["keyid"],
-        )
-        assert not self._verified(tmp_path, claim_id)
-
-    def test_a_seed_envelope_from_anyone_but_the_asserter_is_refused(
-        self, tmp_path: Path,
-    ) -> None:
-        """The seed exemption's premise, required rather than assumed.
-
-        A seed is exempt from the self-validation rule because a
-        born-ESTABLISHED claim is attested by its own asserter. Skipping the
-        check on the strength of the payloadType let any enrolled key promote
-        any claim by calling its envelope a seed.
-        """
-        root_key = _bootstrap(tmp_path, "root.key")
-        peer_key = _bootstrap(tmp_path, "peer.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(peer_key).public_key(),
-                ),
-                identity="a human reviewer", validator_type="human",
-            )
-        claim_id = self._replicated_claim(tmp_path, root_key)
-        self._plant_seed_envelope(
-            tmp_path, claim_id, peer_key, enrolled["keyid"],
-        )
-        assert not self._verified(tmp_path, claim_id)
-
-    def test_appending_a_role_signature_does_not_buy_a_seed(
-        self, tmp_path: Path,
-    ) -> None:
-        """A capability must not rest on a set the attacker can grow.
-
-        Everywhere else in this file membership in the claim's signer set is a
-        DISQUALIFICATION, and a wider answer there is the safer one. The seed
-        branch is the one place it grants something, and the set grows: role
-        signatures cover the same PAE bytes as the asserter's, the role label is
-        the asserter's own metadata, and the bundle is rewritten non-NULL to
-        non-NULL on the Rekor path, so an enrolled peer can append itself as a
-        reviewer of somebody else's claim and join. Entitlement to seed rests on
-        the asserting signature alone.
-        """
-        import base64
-
-        root_key = _bootstrap(tmp_path, "root.key")
-        peer_key = _bootstrap(tmp_path, "peer.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(peer_key).public_key(),
-                ),
-                identity="a human reviewer", validator_type="human",
-            )
-        claim_id = self._replicated_claim(tmp_path, root_key)
-
-        # The peer appends its own valid role signature to a claim it did not
-        # assert, which is what joins it to the signer set.
-        raw = sqlite3.connect(tmp_path / ".mareforma" / "graph.db")
-        bundle = json.loads(
-            raw.execute(
-                "SELECT signature_bundle FROM claims WHERE claim_id = ?",
-                (claim_id,),
-            ).fetchone()[0]
-        )
-        pae = _signing.dsse_pae(
-            _signing.PAYLOAD_TYPE_CLAIM,
-            base64.standard_b64decode(bundle["payload"]),
-        )
-        bundle["signatures"].append({
-            "keyid": enrolled["keyid"],
-            "sig": base64.standard_b64encode(
-                _signing.load_private_key(peer_key).sign(pae)
-            ).decode("ascii"),
-            "role": "reviewer",
-        })
-        raw.execute(
-            "UPDATE claims SET signature_bundle = ? WHERE claim_id = ?",
-            (json.dumps(bundle), claim_id),
-        )
-        raw.commit()
-        raw.close()
-
-        self._plant_seed_envelope(
-            tmp_path, claim_id, peer_key, enrolled["keyid"],
-        )
-        assert not self._verified(tmp_path, claim_id)
-
-    def _restore_the_backup(self, tmp_path: Path):
-        """Force a backup carrying the planted row, then restore it fresh."""
-        import shutil
-
-        root_key = tmp_path / "root.key"
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            g.assert_claim("a write, to rewrite the backup", generated_by="rw")
-        recovered = tmp_path / "recovered"
-        recovered.mkdir()
-        shutil.copy(tmp_path / "claims.toml", recovered / "claims.toml")
-        from mareforma.db.restore import restore
-        return restore, recovered
-
-    def test_restore_refuses_a_seed_from_anyone_but_the_asserter(
-        self, tmp_path: Path,
-    ) -> None:
-        """The read path and restore have to answer this the same way.
-
-        They disagreed once already, in the other direction, and the disagreement
-        was the finding: restore refused bytes the read path served. A rule
-        written twice drifts unless something holds the two together.
-        """
-        root_key = _bootstrap(tmp_path, "root.key")
-        peer_key = _bootstrap(tmp_path, "peer.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(peer_key).public_key(),
-                ),
-                identity="a human reviewer", validator_type="human",
-            )
-        claim_id = self._replicated_claim(tmp_path, root_key)
-        self._plant_seed_envelope(
-            tmp_path, claim_id, peer_key, enrolled["keyid"],
-        )
-        restore, recovered = self._restore_the_backup(tmp_path)
-        with pytest.raises(_db.RestoreError):
-            restore(recovered)
-
-    def test_restore_refuses_an_llm_seed(self, tmp_path: Path) -> None:
-        """The llm ceiling on the seed path, on the recovery side."""
-        root_key = _bootstrap(tmp_path, "root.key")
-        llm_key = _bootstrap(tmp_path, "llm.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(llm_key).public_key(),
-                ),
-                identity="a machine reviewer", validator_type="llm",
-            )
-        claim_id = self._replicated_claim_asserted_by(
-            tmp_path, root_key, llm_key,
-        )
-        self._plant_seed_envelope(
-            tmp_path, claim_id, llm_key, enrolled["keyid"],
-        )
-        restore, recovered = self._restore_the_backup(tmp_path)
-        with pytest.raises(_db.RestoreError):
-            restore(recovered)
-
-    def test_a_real_seed_claim_still_verifies(self, tmp_path: Path) -> None:
-        """The premise. The bootstrap path has to keep working."""
-        import warnings
-
-        root_key = _bootstrap(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                cid = g.assert_claim("anchor", generated_by="seed", seed=True)
-        with mareforma.open(tmp_path, load_key=False) as g:
-            claim = g.get_claim(cid)
-        assert claim["support_level"] == "ESTABLISHED"
-        assert claim["verified"]
-
-    def test_an_entitled_human_validator_still_ratifies(
-        self, tmp_path: Path,
-    ) -> None:
-        """The premise. Without it the two above pass on a reader that refuses
-        every promotion."""
-        root_key = _bootstrap(tmp_path, "root.key")
-        peer_key = _bootstrap(tmp_path, "peer.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            enrolled = g.enroll_validator(
-                _signing.public_key_to_pem(
-                    _signing.load_private_key(peer_key).public_key(),
-                ),
-                identity="a human reviewer", validator_type="human",
-            )
-        claim_id = self._replicated_claim(tmp_path, root_key)
-        self._plant_established(
-            tmp_path, claim_id, peer_key, enrolled["keyid"],
-        )
-        assert self._verified(tmp_path, claim_id)

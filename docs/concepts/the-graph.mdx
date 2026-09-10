@@ -8,11 +8,11 @@ The graph is the set of all claims and the relationships between them:
 (what this claim is in tension with).
 
 ```
-upstream_ref ──► ANALYTICAL claim (lab_a)  ──┐
-                                              ├──► REPLICATED
-upstream_ref ──► ANALYTICAL claim (lab_b)  ──┘
+upstream_ref ──► ANALYTICAL claim (lab_a, key A)  ──┐
+                                                     ├──► two lines
+upstream_ref ──► ANALYTICAL claim (lab_b, key B)  ──┘
                     │
-                    └──► DERIVED synthesis ──► (human) ──► ESTABLISHED
+                    └──► DERIVED synthesis ──► (human) ──► signed validation
 ```
 
 Trust is derived from this structure, and read off two derived axes: `Status`
@@ -21,10 +21,9 @@ per `content_id` (the state of the answer) and `question_status` per `frame_id`
 `graph.proposition_status(prop)`. The more independent paths converge on the
 same upstream evidence, the stronger a proposition's status. A single agent
 asserting the same claim a thousand times stays at the bottom of the scale:
-independence of provenance paths is what matters. The stored `support_level`
-ladder (`PRELIMINARY` / `REPLICATED` / `ESTABLISHED`) shown above is the legacy
-per-claim axis; its `REPLICATED` / `ESTABLISHED` public labels are deprecated for
-v0.4.0.
+independence of provenance paths is what matters. Nothing stored on a claim
+ranks it; what two agreeing lines are worth is computed on read and reported on
+the independence axis.
 
 ## supports[]
 
@@ -50,7 +49,7 @@ with an existing one, both coexist in the graph; neither is silently
 overwritten.
 
 ```python
-established_id = "..."  # ESTABLISHED finding
+prior_id = "..."  # a prior finding
 
 graph.assert_claim(
     "Contrary to the established finding, our larger cohort (n=1200) "
@@ -61,8 +60,8 @@ graph.assert_claim(
 )
 ```
 
-Science advances by documented contestation. ESTABLISHED means
-human-validated evidence, not settled truth.
+Science advances by documented contestation. A human's signed validation means
+somebody put their name to it, not that the question is settled.
 
 ## Reading a chain of origins
 
@@ -86,12 +85,14 @@ when you walk the `supports[]` edges.
 ## Graph fragmentation
 
 The most common failure mode: two agents assert the same finding in different
-words without linking to a common upstream in `supports[]`. REPLICATED never
-fires because the graph cannot detect convergence without a shared anchor.
+words without linking to a common upstream in `supports[]`. Nothing can read
+them as two lines on one question, because there is no shared anchor to read
+them against.
 
-The mitigation is the shared anchor itself: both agents cite the same
-`ESTABLISHED` upstream in `supports[]` and sign with distinct keys, and
-REPLICATED fires. Sharing an `idempotency_key` is not an alternative. It
+The mitigation is the shared anchor itself: both agents cite the same upstream
+in `supports[]` and sign with distinct keys, so the independence axis has two
+distinct signers on one anchor to count. Sharing an `idempotency_key` is not an
+alternative. It
 raises rather than merging two authors into one row, since the merge would
 discard the second contribution; see the API reference
 [`assert_claim` → Idempotency](/reference/api#idempotency).

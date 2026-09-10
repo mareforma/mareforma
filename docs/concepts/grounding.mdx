@@ -270,11 +270,11 @@ versioned: a claim asserted without the observer produces byte-identical signed
 bytes to a pre-observer claim, and its absence is read as "no verdict recorded,"
 never as tampering.
 
-Grounding is a **necessary floor for promotion, never sufficient**. A finding that
-execution shows is not grounded (`UNGROUNDED` or `OPAQUE`) never counts toward a
-support-level promotion. A `GROUNDED` verdict still has to clear the
-independent-signer counts described in [Trust](/concepts/trust). A claim without a
-verdict is unaffected, so the axis is purely additive.
+Grounding is **one axis, and it gates nothing**. A finding that execution shows is
+not grounded (`UNGROUNDED` or `OPAQUE`) reads that way on the trust map and under
+`mareforma verify`, and a reader weighs it beside the effective-independence
+number described in [Trust](/concepts/trust). Neither axis is a floor for the
+other. A claim without a verdict is unaffected, so the axis is purely additive.
 
 ## Not the same as the declared classification
 

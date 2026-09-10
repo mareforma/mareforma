@@ -288,68 +288,15 @@ class TestPromotionFlagArm:
     promoted row's envelope and the signed evidence backing its level, and a
     tier-independent audit-grade re-check of the row's own bundle. Only the
     flag arm speaks to promotion, and it had no test: the branch that turns a
-    REPLICATED row whose backing collapsed into a tampered verdict was carried
+    converged row whose backing collapsed into a tampered verdict was carried
     on inspection alone.
 
     The peer is what gets tampered here, not the row under test. X earned
-    REPLICATED by converging with a distinct signer on a shared anchor; break
+    corroborated by a distinct signer on a shared anchor; break
     that peer's signature and X's own bundle still verifies, so the audit-grade
     arm stays silent and the flag arm is the only thing that can produce the
     verdict.
     """
-
-    def test_a_promotion_whose_peer_no_longer_verifies_is_tampered(
-        self, tmp_path: Path,
-    ) -> None:
-        from cryptography.hazmat.primitives import serialization
-
-        from tests._helpers import _bootstrap_key, _two_signers
-
-        def _pem(signer):
-            return signer.public_key().public_bytes(
-                serialization.Encoding.PEM,
-                serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-
-        sa, sb = _two_signers(tmp_path)
-        root_key = _bootstrap_key(tmp_path, "root.key")
-        with mareforma.open(tmp_path, key_path=root_key) as g:
-            # Both signers enrolled: without a pubkey to check a bundle
-            # against, the participant check has nothing to verify and the row
-            # reads unverifiable rather than failed, which never reaches this
-            # arm.
-            g.enroll_validator(_pem(sa), identity="lab_a")
-            g.enroll_validator(_pem(sb), identity="lab_b")
-            anchor = g.assert_claim("anchor", generated_by="seed", seed=True)
-            x = g.assert_claim(
-                "X", supports=[anchor], generated_by="lab_a", signer=sa)
-            y = g.assert_claim(
-                "Y", supports=[anchor], generated_by="lab_b", signer=sb)
-            assert g.get_claim(x)["support_level"] == "REPLICATED"
-
-        conn = open_db(tmp_path)
-        bundle = json.loads(conn.execute(
-            "SELECT signature_bundle FROM claims WHERE claim_id = ?", (y,),
-        ).fetchone()[0])
-        bundle["signatures"][0]["sig"] = base64.standard_b64encode(
-            b"\x00" * 64).decode()
-        conn.execute(
-            "UPDATE claims SET signature_bundle = ? WHERE claim_id = ?",
-            (json.dumps(bundle), y),
-        )
-        conn.commit()
-        conn.close()
-
-        with mareforma.open(tmp_path, load_key=False) as g:
-            claim = g.get_claim(x)
-            assert claim["verified"] is False, "the flag arm did not fire"
-            result = classify_claim_verdict(g._conn, claim, x)
-        assert result.verdict == "tampered", result.reason
-        assert result.reason == "signature failed re-verification on read", (
-            "another arm fired too, so this no longer isolates the flag arm: "
-            + result.reason
-        )
-
 
 class TestUnsignedClaimIsUnverifiable:
     """A claim carrying no signature cannot be verified, and must not say it was.
@@ -404,7 +351,7 @@ class TestUnsignedClaimIsUnverifiable:
     def test_tampered_still_outranks_unsigned(self, tmp_path: Path) -> None:
         """Precedence: a definite NO beats missing material.
 
-        An unsigned row whose support_level was forged carries both an
+        An unsigned row whose signed material does not check out carries both an
         unchecked reason and a problem. The problem must win, so a gate that
         only fails on 1 still catches it.
         """
@@ -414,10 +361,6 @@ class TestUnsignedClaimIsUnverifiable:
             with mareforma.open(".", load_key=False) as g:
                 cid = g.assert_claim("unsigned", classification="ANALYTICAL")
             conn = open_db(Path("."))
-            conn.execute(
-                "UPDATE claims SET support_level = 'REPLICATED' WHERE claim_id = ?",
-                (cid,),
-            )
             conn.commit()
             conn.close()
             res = r.invoke(cli, ["verify", cid, "--json"])

@@ -48,7 +48,7 @@ _STEPS = (
     ("drop the old table", sqlite3.SQLITE_DROP_TABLE, "claims"),
     ("rename", sqlite3.SQLITE_ALTER_TABLE, "main"),
     ("recreate the triggers", sqlite3.SQLITE_CREATE_TRIGGER,
-     "claims_insert_state_check"),
+     "claims_signed_fields_no_laundering"),
     ("recreate the indexes", sqlite3.SQLITE_CREATE_INDEX,
      "idx_claims_artifact_hash"),
     ("bump the version", sqlite3.SQLITE_PRAGMA, "user_version"),
@@ -132,6 +132,47 @@ def _assert_untouched(root: Path, before: dict) -> None:
     assert set(_ALL_EXPECTED_TRIGGERS) <= after["triggers"]
 
 
+
+def _rebuild_claims_unchanged(conn) -> None:
+    """A step that rebuilds ``claims`` under the definition this release has.
+
+    The runner's mechanics are what these tests are about: the copy, the drop,
+    the rename, the guards, the version bump, and what a failure part-way
+    leaves behind. A step that changes the table would make every one of them
+    depend on which columns this release happens to have.
+
+    It reads the live column list rather than assuming one, so it runs on a
+    graph a released version wrote as readily as on a fresh one: what the
+    current definition can hold is carried, and whatever is left over is
+    declared as dropped, which is what the runner requires of any step.
+
+    It lives here rather than in the package because the package has no such
+    step any more. The one it shipped was there to prove the machinery on real
+    graphs before a narrowing step relied on it, and that release never
+    published, so it was removed rather than frozen in place.
+    """
+    live = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
+    keep = tuple(c for c in _core._CLAIM_COLUMNS if c in live)
+    # Whatever this release cannot carry, the objects that read it cannot be
+    # carried either: the rebuild replays an index or an unmanaged trigger
+    # verbatim, and one naming a column that is going fails at the CREATE. A
+    # narrowing step retires them by name, and this stands in for one.
+    going = set(live) - set(keep)
+    if going:
+        for kind, name, sql in conn.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE tbl_name = 'claims' AND type IN ('index', 'trigger')"
+        ).fetchall():
+            if sql and any(col in sql for col in going):
+                conn.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+    _core._rebuild_table(
+        conn, table="claims",
+        create_sql=_core.claims_rebuild_sql("claims_new"),
+        columns=keep,
+        drops=tuple(sorted(live - set(keep))),
+    )
+
+
 class TestTheHappyPath:
     def test_a_rebuild_leaves_the_graph_it_started_with(
         self, tmp_path: Path,
@@ -144,7 +185,7 @@ class TestTheHappyPath:
         with _core._upgrade_window(conn):
             _core._run_migration(
                 conn, to_version=before["user_version"],
-                steps=_core._rebuild_claims_unchanged,
+                steps=_rebuild_claims_unchanged,
             )
         conn.close()
         _assert_untouched(tmp_path, before)
@@ -164,7 +205,7 @@ class TestTheHappyPath:
         conn.row_factory = sqlite3.Row
         with _core._upgrade_window(conn):
             _core._run_migration(
-                conn, to_version=1, steps=_core._rebuild_claims_unchanged,
+                conn, to_version=1, steps=_rebuild_claims_unchanged,
             )
         # Match either spelling. The reparse check renames the table aside and
         # back, and SQLite requotes the clause it rewrites, so the stored text
@@ -203,7 +244,7 @@ class TestTheHappyPath:
         conn.row_factory = sqlite3.Row
         with _core._upgrade_window(conn):
             _core._run_migration(
-                conn, to_version=1, steps=_core._rebuild_claims_unchanged,
+                conn, to_version=1, steps=_rebuild_claims_unchanged,
             )
         after = conn.execute("SELECT COUNT(*) FROM claims_fts").fetchone()[0]
         claims = conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
@@ -224,11 +265,100 @@ class TestTheHappyPath:
         conn.execute("PRAGMA foreign_keys = ON")
         with _core._upgrade_window(conn):
             _core._run_migration(
-                conn, to_version=1, steps=_core._rebuild_claims_unchanged,
+                conn, to_version=1, steps=_rebuild_claims_unchanged,
             )
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA legacy_alter_table").fetchone()[0] == 0
         conn.close()
+
+
+class TestARowTheOldSchemaAllowedAndTheNewOneDoesNot:
+    """A graph carrying one must be told what to do, not left unopenable.
+
+    The new claims table asks that a row naming a validator carry the envelope
+    proving one. The old one never asked it on UPDATE: its check fired on
+    support_level alone, and the validation columns are not on the laundering
+    trigger's watch list either. So the row is legal for an older graph to hold
+    and illegal for this one.
+
+    Left to the rebuild, the CHECK fails inside the migration, the step rolls
+    back, and every later open tries again and fails identically, so the graph
+    never opens again. The only report is SQLite's constraint text, which names
+    no claim and offers no action.
+    """
+
+    def _a_v1_graph_holding_one(self, root: Path) -> Path:
+        key = _populated(root)
+        raw = sqlite3.connect(_db(root))
+        # A real v1 table has no such CHECK. Neutralise it in the stored schema
+        # rather than working around it, so the row lands the way it would have.
+        # Replaced with an always-true check rather than deleted, which keeps the
+        # surrounding commas valid without reflowing the DDL.
+        sql = raw.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='claims'"
+        ).fetchone()[0]
+        stripped = sql.replace(
+            "CHECK (validation_signature IS NOT NULL\n"
+            "           OR (validated_by IS NULL AND validated_at IS NULL))",
+            "CHECK (1)",
+        )
+        assert stripped != sql, "the CHECK this test is about was not found"
+        raw.execute("PRAGMA writable_schema = ON")
+        raw.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type='table' AND name='claims'",
+            (stripped,),
+        )
+        raw.execute("PRAGMA writable_schema = OFF")
+        raw.commit()
+        raw.close()
+
+        raw = sqlite3.connect(_db(root))
+        raw.execute(
+            "UPDATE claims SET validated_by = 'a name nobody signed for', "
+            "validated_at = '2026-01-01T00:00:00+00:00' "
+            "WHERE claim_id = (SELECT claim_id FROM claims ORDER BY rowid LIMIT 1)"
+        )
+        raw.execute("PRAGMA user_version = 1")
+        raw.commit()
+        raw.close()
+        return key
+
+    def test_the_upgrade_names_the_claim_and_says_what_to_do(
+        self, tmp_path: Path,
+    ) -> None:
+        self._a_v1_graph_holding_one(tmp_path)
+        before = _fingerprint(tmp_path)
+
+        with pytest.raises(MigrationError) as caught:
+            _core.open_db(tmp_path).close()
+
+        said = str(caught.value)
+        claim_id = sqlite3.connect(_db(tmp_path)).execute(
+            "SELECT claim_id FROM claims WHERE validated_by IS NOT NULL"
+        ).fetchone()[0]
+        assert claim_id in said, "the operator cannot act without the claim id"
+        assert "do not delete it" in said
+        assert "Clear validated_by" in said, "no remedy offered"
+        _assert_untouched(tmp_path, before)
+
+    def test_clearing_the_field_lets_the_upgrade_through(
+        self, tmp_path: Path,
+    ) -> None:
+        """The remedy the message gives has to be one that works."""
+        self._a_v1_graph_holding_one(tmp_path)
+        raw = sqlite3.connect(_db(tmp_path))
+        raw.execute(
+            "UPDATE claims SET validated_by = NULL, validated_at = NULL "
+            "WHERE validation_signature IS NULL"
+        )
+        raw.commit()
+        raw.close()
+
+        conn = _core.open_db(tmp_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        finally:
+            conn.close()
 
 
 class TestTheCrashMatrix:
@@ -255,7 +385,7 @@ class TestTheCrashMatrix:
         with pytest.raises(MigrationError, match="rolled back"):
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
         conn.set_authorizer(None)
         conn.close()
@@ -279,7 +409,7 @@ class TestTheCrashMatrix:
                 with _core._upgrade_window(conn):
                     _core._run_migration(
                         conn, to_version=2,
-                        steps=_core._rebuild_claims_unchanged,
+                        steps=_rebuild_claims_unchanged,
                     )
             conn.set_authorizer(None)
             conn.close()
@@ -308,7 +438,7 @@ class TestTheCrashMatrix:
         with pytest.raises(MigrationError) as caught:
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
         conn.set_authorizer(None)
         conn.close()
@@ -350,7 +480,7 @@ class TestInterruptedMidStatement:
         with pytest.raises(MigrationError):
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
         assert armed["yes"], "the copy never started, nothing was interrupted"
         conn.set_progress_handler(None, 0)
@@ -395,7 +525,7 @@ class TestKilledOutright:
             conn.set_progress_handler(die, 8)
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
             """
         )
@@ -508,7 +638,7 @@ class TestAgainstGraphsRealUsersHold:
         with _core._upgrade_window(conn):
             _core._run_migration(
                 conn, to_version=before["user_version"],
-                steps=_core._rebuild_claims_unchanged,
+                steps=_rebuild_claims_unchanged,
             )
         conn.close()
 
@@ -534,7 +664,7 @@ class TestAgainstGraphsRealUsersHold:
 
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         with mareforma.open(project, key_path=project / "root.key") as g:
             assert len(g.query(include_invalidated=True)) == 6
@@ -574,7 +704,7 @@ class TestAgainstGraphsRealUsersHold:
         with pytest.raises(MigrationError):
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
         conn.set_authorizer(None)
         conn.close()
@@ -607,7 +737,7 @@ class TestWhatTheMigrationMustNotQuietlyRepair:
 
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         conn = _core.open_db(tmp_path)
         missing = _core.schema_census_missing(conn)
@@ -647,7 +777,7 @@ class TestWhatTheMigrationMustNotQuietlyRepair:
 
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         conn = _core.open_db(tmp_path)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(claims)")}
@@ -674,7 +804,7 @@ class TestConcurrentUpgrades:
 
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         holder = sqlite3.connect(_db(tmp_path), timeout=0.1)
         holder.execute("BEGIN IMMEDIATE")
@@ -754,7 +884,7 @@ class TestAPartialChain:
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 3)
         monkeypatch.setattr(
             _core, "_MIGRATIONS",
-            {1: (2, _core._rebuild_claims_unchanged), 2: (3, boom)},
+            {1: (2, _rebuild_claims_unchanged), 2: (3, boom)},
         )
         conn = sqlite3.connect(_db(tmp_path))
         conn.row_factory = sqlite3.Row
@@ -792,7 +922,7 @@ class TestABrokenRegistry:
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
             _core, "_MIGRATIONS",
-            {1: (to_version, _core._rebuild_claims_unchanged)},
+            {1: (to_version, _rebuild_claims_unchanged)},
         )
         conn = sqlite3.connect(_db(tmp_path))
         conn.row_factory = sqlite3.Row
@@ -825,7 +955,7 @@ class TestTheRebuildLeavesTheTableAsItFoundIt:
         conn.row_factory = sqlite3.Row
         with _core._upgrade_window(conn):
             _core._run_migration(
-                conn, to_version=1, steps=_core._rebuild_claims_unchanged,
+                conn, to_version=1, steps=_rebuild_claims_unchanged,
             )
         live = {
             r[0] for r in conn.execute(
@@ -863,7 +993,7 @@ class TestTheRebuildLeavesTheTableAsItFoundIt:
             with _core._upgrade_window(conn):
                 _core._run_migration(
                     conn, to_version=1,
-                    steps=_core._rebuild_claims_unchanged,
+                    steps=_rebuild_claims_unchanged,
                 )
         conn.set_authorizer(None)
         conn.close()
@@ -986,7 +1116,7 @@ class TestAConcurrentUpgradeCannotSlipPastTheGate:
 
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         monkeypatch.setattr(_core, "_run_migration", noop)
         conn = sqlite3.connect(_db(tmp_path))
@@ -1006,7 +1136,7 @@ class TestAConcurrentUpgradeCannotSlipPastTheGate:
         with _core._upgrade_window(conn):
             _core._run_migration(
                 conn, to_version=2, from_version=99,
-                steps=_core._rebuild_claims_unchanged,
+                steps=_rebuild_claims_unchanged,
             )
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         conn.close()
@@ -1131,7 +1261,7 @@ class TestTheWholeRouteIsCheckedBeforeAnythingRuns:
 
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 3)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         with pytest.raises(MigrationError, match="no migration from 2"):
             _core.open_db(tmp_path)
@@ -1365,7 +1495,7 @@ class TestTheSchemaHasToStillResolve:
         with pytest.raises(MigrationError, match="already in this graph"):
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
         conn.close()
 
@@ -1650,7 +1780,7 @@ class TestTheStepAndTheDefinitionHaveToAgree:
         ).fetchone()[0]
         with _core._upgrade_window(conn):
             _core._run_migration(
-                conn, to_version=1, steps=_core._rebuild_claims_unchanged,
+                conn, to_version=1, steps=_rebuild_claims_unchanged,
             )
         after = [
             (r["rowid"], r["claim_id"]) for r in conn.execute(
@@ -1678,7 +1808,7 @@ class TestTheGate:
         conn = sqlite3.connect(_db(tmp_path))
         conn.row_factory = sqlite3.Row
         with pytest.raises(MigrationError, match="outside the upgrade path"):
-            _core._rebuild_claims_unchanged(conn)
+            _rebuild_claims_unchanged(conn)
         conn.close()
 
     def test_the_window_closes_even_when_the_migration_fails(
@@ -1696,7 +1826,7 @@ class TestTheGate:
         with pytest.raises(MigrationError):
             with _core._upgrade_window(conn):
                 _core._run_migration(
-                    conn, to_version=2, steps=_core._rebuild_claims_unchanged,
+                    conn, to_version=2, steps=_rebuild_claims_unchanged,
                 )
         # An authorizer that allows everything, rather than None: removing one
         # by passing None only works from 3.11, and this package supports 3.10,
@@ -1820,7 +1950,7 @@ class TestTheVersionGate:
         _populated(tmp_path)
         monkeypatch.setattr(_core, "_SCHEMA_VERSION", 2)
         monkeypatch.setattr(
-            _core, "_MIGRATIONS", {1: (2, _core._rebuild_claims_unchanged)},
+            _core, "_MIGRATIONS", {1: (2, _rebuild_claims_unchanged)},
         )
         conn = sqlite3.connect(_db(tmp_path))
         conn.row_factory = sqlite3.Row
@@ -1828,11 +1958,16 @@ class TestTheVersionGate:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         conn.close()
 
-    def test_this_release_registers_no_migration(self) -> None:
-        """The rebuild ships on a path nothing reaches, and that is the design.
+    def test_every_registered_route_ends_at_the_current_version(self) -> None:
+        """The registry is walked, not trusted.
 
-        A migration is the one change that cannot be taken back, so the
-        machinery lands and is proven a release before anything depends on it.
+        The previous release shipped the machinery with an empty registry so
+        the rebuild was proven before anything irreversible used it. What that
+        release bought is that adding a route is an entry rather than a
+        rewrite, so what is checked here is the entry: every version below the
+        current one has a step, and the chain arrives exactly at the current
+        one rather than short of it or past it.
         """
-        assert _core._MIGRATIONS == {}
-        assert _core._SCHEMA_VERSION == 1
+        assert _core._MIGRATIONS, "no route out of any earlier version"
+        for start in range(1, _core._SCHEMA_VERSION):
+            assert _core._plan_migration(start)[-1] == _core._SCHEMA_VERSION

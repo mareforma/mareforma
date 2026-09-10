@@ -805,11 +805,11 @@ class TestStrippedSignatureCannotReachTheGrandfather:
         payload["data_ids"] = ["ds_forged"]
         new_claim = str(uuid.uuid4())
         conn.execute(
-            "INSERT INTO claims (claim_id, text, classification, support_level, "
+            "INSERT INTO claims (claim_id, text, classification, "
             " status, generated_by, supports_json, contradicts_json, branch_id, "
             " signature_bundle, asserter_keyid, statement_cid, evidence_json, "
             " predicate_payload, created_at, updated_at, transparency_logged) "
-            "VALUES (?, ?, ?, 'PRELIMINARY', 'open', 'run_forged', '[]', '[]', "
+            "VALUES (?, ?, ?, 'open', 'run_forged', '[]', '[]', "
             " 'main', NULL, NULL, NULL, '{}', ?, ?, ?, 1)",
             (
                 new_claim, claim["text"], claim["classification"],

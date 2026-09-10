@@ -340,11 +340,30 @@ class TestQueryForLLM:
         hostile = "agent\u200ba\u202eX"
         cid = open_graph.assert_claim("finding", generated_by=hostile,
                                       source_name=hostile)
-        open_graph._conn.execute(
-            "UPDATE claims SET validated_by = ? WHERE claim_id = ?",
-            (hostile, cid),
+        # A real validation first: a row cannot say a human validated it
+        # without the envelope proving one did, a junk envelope is dropped on
+        # read, and a key cannot ratify what it signed, so the label has to sit
+        # on a row a second enrolled validator genuinely signed off on.
+        import mareforma
+        from mareforma import signing as _sig
+
+        root = open_graph._root
+        reviewer_key = root / "reviewer.key"
+        _sig.bootstrap_key(reviewer_key)
+        open_graph.enroll_validator(
+            _sig.public_key_to_pem(
+                _sig.load_private_key(reviewer_key).public_key(),
+            ),
+            identity="reviewer@example.org",
         )
-        open_graph._conn.commit()
+        open_graph.close()
+        # The hostile label goes in through the ordinary write, not through a
+        # direct UPDATE afterwards: validated_by is a display name a caller
+        # supplies, so this is the route it actually arrives by, and a
+        # validation cannot be edited once it is written.
+        with mareforma.open(root, key_path=reviewer_key) as reviewer:
+            reviewer.validate(cid, validated_by=hostile)
+        open_graph = mareforma.open(root)
         row = open_graph.query_for_llm()[0]
         for field in _LLM_SANITIZE_FIELDS:
             value = row.get(field)
@@ -357,8 +376,7 @@ class TestQueryForLLM:
         cid = open_graph.assert_claim("finding")
         rows = open_graph.query_for_llm()
         assert rows[0]["claim_id"] == cid
-        # Timestamps and support_level pass through unchanged.
-        assert rows[0]["support_level"] == "PRELIMINARY"
+        # Timestamps pass through unchanged.
         assert "T" in rows[0]["created_at"]  # ISO 8601
 
     def test_query_returns_unwrapped_text(self, open_graph) -> None:
@@ -425,21 +443,30 @@ class TestQueryForLLM:
     def test_filters_apply_same_as_query(self, open_graph, tmp_path) -> None:
         from tests._helpers import _two_signers
         sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
+        upstream = open_graph.assert_claim("upstream", generated_by="seed")
         open_graph.assert_claim(
             "peer A", supports=[upstream], generated_by="A", signer=sa,
         )
         open_graph.assert_claim(
             "peer B", supports=[upstream], generated_by="B", signer=sb,
         )
-        # Both peers converge → REPLICATED. min_support='REPLICATED' is
-        # inclusive of ESTABLISHED, so the seeded upstream is also
-        # returned. The filter still applies, three results, none at
-        # PRELIMINARY.
-        rows = open_graph.query_for_llm(min_support="REPLICATED")
-        assert len(rows) == 3
-        texts = " ".join(r["text"] for r in rows)
-        assert "peer A" in texts and "peer B" in texts and "upstream" in texts
+        open_graph.assert_claim(
+            "a computed one", classification="ANALYTICAL",
+            source_name="dataset", generated_by="C",
+        )
+        # The support filter is gone from every public read, so the filter this
+        # checks is the one that is left, and it has to exclude something. The
+        # earlier shape asked for a classification every row in the fixture
+        # already had, so dropping the pass-through entirely changed no result
+        # and the delegation went uncovered.
+        rows = open_graph.query_for_llm(classification="ANALYTICAL")
+        assert len(rows) == 1
+        assert "a computed one" in rows[0]["text"]
+
+        unfiltered = open_graph.query_for_llm()
+        assert len(unfiltered) == 4, (
+            "the filter has to leave rows out, or forwarding it proves nothing"
+        )
 
 
 # ---------------------------------------------------------------------------

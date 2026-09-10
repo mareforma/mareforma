@@ -137,7 +137,7 @@ def encode_predicate_into_text(predicate: dict[str, Any], summary: str) -> str:
     payload = json.dumps(predicate, sort_keys=True, separators=(",", ":"))
     if PREDICATE_TAG_OPEN in payload or PREDICATE_TAG_CLOSE in payload:
         raise PredicateBoundaryError(
-            "predicate JSON contains a tag boundary marker — refusing to "
+            "predicate JSON contains a tag boundary marker, refusing to "
             "encode an ambiguous claim text"
         )
     return f"{PREDICATE_TAG_OPEN}{payload}{PREDICATE_TAG_CLOSE}\n{summary}"

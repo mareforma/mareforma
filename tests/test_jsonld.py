@@ -54,7 +54,9 @@ class TestContextAndStructure:
         ctx = doc["@context"]
         assert "claimText" in ctx
         assert "classification" in ctx
-        assert "supportLevel" in ctx
+        assert "supportLevel" not in ctx, (
+            "the context still declares a term nothing emits"
+        )
         assert "claimStatus" in ctx
 
     def test_every_claim_node_key_survives_expansion(self, tmp_path: Path) -> None:
@@ -194,7 +196,7 @@ class TestFileOutput:
 class TestCallerSuppliedRowsRefuseSubstitution:
     """A caller-supplied row that omits a field is refused, not fabricated.
 
-    Rows from ``list_claims`` always carry ``support_level`` and
+    Rows from ``list_claims`` always carry
     ``classification`` (both columns are NOT NULL), so the normal export is
     unaffected. A caller that hands over its own row missing one of them used to
     get a fabricated ``PRELIMINARY`` / ``INFERRED`` the record never carried;
@@ -212,12 +214,6 @@ class TestCallerSuppliedRowsRefuseSubstitution:
             conn.close()
         assert rows, "expected one claim to export"
         return dict(rows[0])
-
-    def test_export_refuses_row_missing_support_level(self, tmp_path: Path) -> None:
-        row = self._one_row(tmp_path)
-        del row["support_level"]
-        with pytest.raises(KeyError, match="support_level"):
-            JSONLDExporter(tmp_path).export(claims=[row])
 
     def test_export_refuses_row_missing_classification(self, tmp_path: Path) -> None:
         row = self._one_row(tmp_path)

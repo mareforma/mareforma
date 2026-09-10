@@ -35,9 +35,9 @@ from mareforma.db.core import (
     verdict_chain_tip,
     verify_verdict_chain,
 )
-from mareforma.db.errors import FormatArtifactError
+from mareforma.db.errors import FormatArtifactError, RestoreError
 from mareforma.db.restore import restore
-from tests._helpers import _bootstrap_key, _enroll_key, _load_signer
+from tests._helpers import rewrite_backup, _bootstrap_key, _enroll_key, _load_signer
 
 
 def _db(root: Path) -> Path:
@@ -569,11 +569,9 @@ class TestTheReadPathReportsIt:
         toml_path = tmp_path / "claims.toml"
         doc = tomllib.loads(toml_path.read_text())
         del doc["contradiction_verdicts"]["v2"]
-        toml_path.write_text(
-            tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
-        )
+        rewrite_backup(toml_path, doc)
         _shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         conn = open_db(tmp_path)
         try:
@@ -939,8 +937,13 @@ class TestTheBackupSections:
         short.mkdir()
         (short / "claims.toml").write_text(body + tail, encoding="utf-8")
 
-        with pytest.warns(UserWarning, match="disagrees with itself"):
+        # Disclosed by the release that wrote the witness, refused by the one
+        # that binds it. Same file, and the pairing is the whole point.
+        with pytest.raises(RestoreError) as caught:
             restore(short)
+        assert caught.value.kind == "backup_unaccounted"
+        with pytest.warns(UserWarning, match="disagrees with itself"):
+            restore(short, trust_unaccounted_backup=True)
 
         # Held to the reason, not the opening. Re-serializing the file to drop
         # a claim also breaks the digest, so this stayed green with the count
@@ -984,9 +987,16 @@ class TestTheBackupSections:
         (short / "claims.toml").write_text(
             raw[: raw.rindex("[claims.")], encoding="utf-8",
         )
+        # The stamp survives the cut, so the file still says it owed a table.
+        # This release stops there rather than rebuilding a graph it knows is
+        # short.
+        with pytest.raises(RestoreError) as refused:
+            restore(short)
+        assert refused.value.kind == "backup_unaccounted"
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            report = restore(short)
+            report = restore(short, trust_unaccounted_backup=True)
         assert report["claims_restored"] == 2
         assert [
             w for w in caught if "claims.toml at" in str(w.message)
@@ -1020,6 +1030,205 @@ class TestTheBackupSections:
         assert verify_completeness_digest(toml_path)
 
 
+class TestTheChainIsHeldToWhatTheTableSaysAboutIt:
+    """The three verdict fields in [completeness] are read, not just written.
+
+    The writer records the chain tip, how many links cover it, and how many
+    verdicts the file holds. Nothing read them, so a backup could be edited to
+    drop a verdict and its link and the recovery accepted it: the claim that
+    verdict had invalidated came back clean, and the graph reported nothing.
+
+    Held to the same bar as the row counts beside them, and no higher. Somebody
+    who recomputes the whole table defeats this, exactly as they defeat the row
+    counts. What it closes is the edit that removes rows and leaves the table.
+    """
+
+    @staticmethod
+    def _erase_a_verdict(root: Path, *, recompute_sections: bool) -> Path:
+        """Take a verdict and its chain link out of the backup.
+
+        With *recompute_sections* the editor also fixes the row counts, which
+        is what it takes to get past the check beside this one.
+        """
+        import tomli_w
+
+        doc = tomllib.loads((root / "claims.toml").read_text(encoding="utf-8"))
+        doc["contradiction_verdicts"] = {}
+        doc["verdict_chain"] = {}
+        if recompute_sections:
+            doc["completeness"]["sections"]["contradiction_verdicts"] = 0
+            doc["completeness"]["sections"]["verdict_chain"] = 0
+        dest = root.parent / f"recovered-{recompute_sections}"
+        dest.mkdir()
+        body = tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
+        tail = tomli_w.dumps({"completeness": doc["completeness"]})
+        (dest / "claims.toml").write_text(body + tail, encoding="utf-8")
+        return dest
+
+    def test_an_untouched_backup_restores_and_keeps_the_invalidation(
+        self, tmp_path: Path,
+    ) -> None:
+        """The half that matters most: no false positive on an honest file."""
+        root_key, _, claims = _graph_with_verdicts(tmp_path, count=1)
+        invalidated = claims[0]
+        import shutil
+
+        dest = tmp_path.parent / (tmp_path.name + "-clean")
+        dest.mkdir()
+        shutil.copy(tmp_path / "claims.toml", dest / "claims.toml")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            restore(dest)
+        with mareforma.open(dest, key_path=root_key) as g:
+            assert g.get_claim(invalidated)["t_invalid"] is not None, (
+                "an honest backup lost the invalidation it carried"
+            )
+
+    def test_erasing_a_verdict_is_refused_even_with_the_counts_fixed(
+        self, tmp_path: Path,
+    ) -> None:
+        _graph_with_verdicts(tmp_path, count=1)
+        dest = self._erase_a_verdict(tmp_path, recompute_sections=True)
+        with pytest.raises(RestoreError) as caught:
+            restore(dest)
+        assert caught.value.kind == "backup_unaccounted"
+        assert "verdict_chain_mismatch" in str(caught.value)
+
+    def test_the_reason_names_the_chain_and_not_only_the_row_counts(
+        self, tmp_path: Path,
+    ) -> None:
+        """The careless edit trips both, and both have to be reported.
+
+        Naming only the row counts would send an operator looking at section
+        sizes for a chain that is the thing actually missing.
+        """
+        _graph_with_verdicts(tmp_path, count=1)
+        dest = self._erase_a_verdict(tmp_path, recompute_sections=False)
+        from mareforma.db.restore import (
+            _disclose_a_file_that_disagrees_with_itself,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reasons = _disclose_a_file_that_disagrees_with_itself(
+                dest / "claims.toml",
+                tomllib.loads((dest / "claims.toml").read_text()),
+            )
+        assert "verdict_chain_mismatch" in reasons
+        assert "section_count_mismatch" in reasons
+
+    def test_a_chain_key_that_is_not_a_number_is_refused_not_raised(
+        self, tmp_path: Path,
+    ) -> None:
+        """The recovery path must not fail with a bare exception.
+
+        The tip is the highest sequence number, so reading it converts the
+        keys. Those keys come from the file, and this runs on the path whose
+        whole purpose is a file somebody hand-edited, so a key that is not a
+        number reached ``int()`` and left ``restore`` raising ValueError past
+        its documented RestoreError contract. A disclosure must never be the
+        thing that fails a recovery.
+        """
+        import tomli_w
+
+        _graph_with_verdicts(tmp_path, count=1)
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text(encoding="utf-8"))
+        seq = next(iter(doc["verdict_chain"]))
+        doc["verdict_chain"]["oops"] = doc["verdict_chain"].pop(seq)
+        dest = tmp_path.parent / (tmp_path.name + "-badkey")
+        dest.mkdir()
+        body = tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
+        tail = tomli_w.dumps({"completeness": doc["completeness"]})
+        (dest / "claims.toml").write_text(body + tail, encoding="utf-8")
+
+        with pytest.raises(RestoreError) as caught:
+            restore(dest)
+        assert "oops" in str(caught.value)
+
+    def test_the_shared_computation_never_raises_on_a_hand_edited_chain(
+        self,
+    ) -> None:
+        """The same function runs on the WRITER side, where raising would be
+        worse: it would fail the backup of a healthy graph."""
+        from mareforma.db.core import _verdict_chain_completeness
+
+        for chain in (
+            {"notanumber": {"tip": "x"}},
+            {"1": {"tip": "a"}, "bad": {"tip": "z"}},
+            {"1": "not-a-table"},
+            {"1": {}},
+        ):
+            got = _verdict_chain_completeness({"verdict_chain": chain})
+            assert set(got) == {
+                "verdict_chain_tip", "verdict_chain_covered", "verdicts_total",
+            }
+            assert isinstance(got["verdict_chain_tip"], str)
+
+    def test_a_file_written_before_the_fields_existed_is_not_refused(
+        self, tmp_path: Path,
+    ) -> None:
+        """The fields are absent in an older backup, and absence is not a lie.
+
+        Refusing on a missing field would lock an operator out of a graph whose
+        only fault is being older than the check.
+        """
+        import tomli_w
+
+        _graph_with_verdicts(tmp_path, count=1)
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text(encoding="utf-8"))
+        for field in ("verdict_chain_tip", "verdict_chain_covered",
+                      "verdicts_total"):
+            doc["completeness"].pop(field, None)
+        dest = tmp_path.parent / (tmp_path.name + "-older")
+        dest.mkdir()
+        body = tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
+        tail = tomli_w.dumps({"completeness": doc["completeness"]})
+        (dest / "claims.toml").write_text(body + tail, encoding="utf-8")
+        from mareforma.db.restore import (
+            _disclose_a_file_that_disagrees_with_itself,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reasons = _disclose_a_file_that_disagrees_with_itself(
+                dest / "claims.toml", doc,
+            )
+        assert "verdict_chain_mismatch" not in reasons
+
+
+class TestTheWarningSaysWhatActuallyHappens:
+    """The sentence an operator reads first has to be true.
+
+    The closing was chosen from the override flag alone, so a file that only
+    broke its digest, which is deliberately not fatal, was told "Nothing has
+    been restored" and then restored. That is a false sentence in the one
+    message the operator was meant to act on.
+    """
+
+    def test_a_digest_break_alone_does_not_claim_nothing_was_restored(
+        self, tmp_path: Path,
+    ) -> None:
+        import tomli_w
+
+        root_key, _, _ = _graph_with_verdicts(tmp_path, count=1)
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text(encoding="utf-8"))
+        dest = tmp_path.parent / (tmp_path.name + "-redigest")
+        dest.mkdir()
+        # Re-serialised, so the digest no longer reproduces. Nothing else moved.
+        body = tomli_w.dumps({k: v for k, v in doc.items() if k != "completeness"})
+        tail = tomli_w.dumps({"completeness": doc["completeness"]})
+        (dest / "claims.toml").write_text(body + "\n" + tail, encoding="utf-8")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            restore(dest)
+        said = [str(w.message) for w in caught if "claims.toml" in str(w.message)]
+        assert said, "the digest break was not disclosed at all"
+        assert "Nothing has been restored" not in said[0], (
+            "the warning claims nothing was restored, and the graph was rebuilt"
+        )
+        with mareforma.open(dest, key_path=root_key) as g:
+            assert g.query(limit=99), "nothing was restored after all"
+
+
 class TestItSurvivesRecovery:
     def test_the_chain_round_trips_through_a_catastrophic_restore(
         self, tmp_path: Path,
@@ -1035,21 +1244,30 @@ class TestItSurvivesRecovery:
 
         import shutil
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
             assert verdict_chain_tip(g._conn) == before
             assert verify_verdict_chain(g._conn) == ()
             assert verdict_chain_coverage(g._conn) == (3, 3)
 
-    def test_a_broken_chain_restores_broken_rather_than_absent(
+    def test_a_broken_chain_is_carried_as_a_count_not_as_the_damage(
         self, tmp_path: Path,
     ) -> None:
-        """Restore replays the chain faithfully and does not sit in judgement.
+        """What the backup keeps of a damaged chain, and what it stops keeping.
 
-        Dropping an unverifiable link on the way in would turn evidence of
-        tampering into silence, which is the direction the whole artifact
-        exists to close. The read path is what reports it, on every read.
+        This used to assert the damage itself round-tripped, on the reasoning
+        that dropping an unverifiable link would turn evidence of tampering
+        into silence. The reasoning was right and the conclusion cost too much:
+        carrying the damage meant the recovery replayed the very row that had
+        wrecked the graph, and the operator had nowhere to go.
+
+        So the file carries the count instead of the poison. The chain is
+        written up to the first link that does not check out, and the number
+        left out is recorded, which is evidence rather than silence. What it
+        gives up is the ability to inspect the bad link from a restored graph;
+        that lives in the graph it came from, which still has it and still
+        reports it on every read.
         """
         root_key, _, _ = _graph_with_verdicts(tmp_path, count=3)
         _unguard(tmp_path)
@@ -1061,12 +1279,206 @@ class TestItSurvivesRecovery:
         with mareforma.open(tmp_path, key_path=root_key) as g:
             g.assert_claim("a later claim that rewrites the backup")
 
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        assert doc["verdict_chain_withheld"] == 1, (
+            "the file did not say what it left out"
+        )
+
         import shutil
         shutil.rmtree(tmp_path / ".mareforma")
-        restore(tmp_path)
+        restore(tmp_path, trust_unaccounted_backup=True)
+
+        # Clean, and shorter, and the file said so before it was opened.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert verify_verdict_chain(g._conn) == ()
+            assert verdict_chain_coverage(g._conn) == (1, 3)
+
+    def test_a_short_chain_is_refused_and_says_why_it_is_short(
+        self, tmp_path: Path,
+    ) -> None:
+        """A count nothing acts on is the same as no count.
+
+        This was a warning first, and a warning is not enough: warnings are
+        routinely filtered, and the file being short is the one signal
+        separating a wrecked graph from a graph written before the chain
+        existed. It also carries the reason, so an operator who has already
+        wiped the graph to make room for the restore is not told to go and
+        read it.
+        """
+        root_key, _, _ = _graph_with_verdicts(tmp_path, count=3)
+        _unguard(tmp_path)
+        conn = _raw(tmp_path)
+        conn.execute("DELETE FROM verdict_chain WHERE seq = 2")
+        conn.commit()
+        conn.close()
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.assert_claim("a later claim that rewrites the backup")
+
+        import shutil
+        shutil.rmtree(tmp_path / ".mareforma")
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "verdict_chain_cut_short"
+        assert "leaves 1 link out" in str(caught.value)
+        assert "out of sequence" in str(caught.value), (
+            "the refusal named a count but not the reason behind it"
+        )
+
+    def test_an_honest_backup_is_not_called_short(self, tmp_path: Path) -> None:
+        """The refusal must not fire on the ordinary case, or it means nothing."""
+        _graph_with_verdicts(tmp_path, count=3)
+
+        import shutil
+        shutil.rmtree(tmp_path / ".mareforma")
+        report = restore(tmp_path)
+        assert report["verdict_chain_withheld"] == 0
+
+    def test_a_row_numbered_below_the_chain_cannot_blank_it_in_silence(
+        self, tmp_path: Path,
+    ) -> None:
+        """One row, no key, no guard removed, and the chain stops being written.
+
+        Sequence numbers 1 upward are taken, so nothing can be put in the
+        middle. Zero and below are free, and they sort first, which fails the
+        very first link and withholds every one after it. The file then holds
+        verdicts and no chain, which is exactly the shape of a backup written
+        before the chain existed, and that shape restores untouched by design.
+
+        So the whole chain going missing has to be louder than the whole chain
+        never having been there. It is the count that separates them, which is
+        why the count is refused on rather than mentioned.
+        """
+        root_key, _, _ = _graph_with_verdicts(tmp_path, count=3)
+        conn = _raw(tmp_path)
+        conn.execute(
+            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
+            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
+            "VALUES (0, 'x', 'junk', 'contradiction', 'nope', 'nope', "
+            "'nokey', X'00', '2026-09-07T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.assert_claim("an ordinary later claim")
+
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        assert "verdict_chain" not in doc, "the plant did not blank the chain"
+        assert doc["verdict_chain_withheld"] == 4
+
+        import shutil
+        shutil.rmtree(tmp_path / ".mareforma")
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "verdict_chain_cut_short"
+
+    def test_the_witness_describes_the_file_and_not_the_graph(
+        self, tmp_path: Path,
+    ) -> None:
+        """The completeness table's job, applied to the one pair that dodged it.
+
+        Every other count there is measured off the file. The chain pair was
+        read off the graph, so a backup the writer could not write in full
+        advertised a chain longer than the one it carried and named a tip no
+        link in it produces, which is the shape that table exists to make
+        visible. A witness that describes something other than the file it
+        sits in is worse than no witness.
+        """
+        root_key, _, _ = _graph_with_verdicts(tmp_path, count=3)
+        witness = tomllib.loads(
+            (tmp_path / "claims.toml").read_text()
+        )["completeness"]
+        assert (witness["verdict_chain_covered"], witness["verdicts_total"]) == (3, 3)
+        assert witness["verdict_chain_tip"]
+
+        conn = _raw(tmp_path)
+        conn.execute(
+            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
+            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
+            "VALUES (0, 'x', 'junk', 'contradiction', 'nope', 'nope', "
+            "'nokey', X'00', '2026-09-07T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.assert_claim("an ordinary later claim")
+
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        witness = doc["completeness"]
+        assert witness["verdict_chain_covered"] == 0, (
+            "the witness claimed links the file does not carry"
+        )
+        assert witness["verdict_chain_tip"] == "", (
+            "the witness named a tip no link in the file produces"
+        )
+        # The verdicts are all still there, so the gap is the whole point.
+        assert witness["verdicts_total"] == 3
+
+    def test_a_row_typed_against_the_schema_does_not_brick_the_graph(
+        self, tmp_path: Path,
+    ) -> None:
+        """The writer runs inside every mutation, so it must not raise.
+
+        A chain row whose issuer holds bytes where the schema says text reaches
+        the hashing as the wrong type and comes back as an error, not a
+        verdict. Scoped to database errors, that escaped the backup writer and
+        took the mutation with it, and the row cannot be deleted because the
+        chain is append-only, so the graph was unwritable for good. Withholding
+        is recoverable. Raising here is not.
+        """
+        root_key, _, _ = _graph_with_verdicts(tmp_path, count=3)
+        conn = _raw(tmp_path)
+        conn.execute(
+            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
+            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
+            "VALUES (9, 'x', 'junk', 'contradiction', 'nope', 'nope', "
+            "X'DEADBEEF', X'00', '2026-09-07T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
 
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            assert verify_verdict_chain(g._conn) != ()
+            g.assert_claim("an ordinary later claim")
+
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        assert doc["verdict_chain_withheld"] == 1
+        assert len(doc["verdict_chain"]) == 3
+
+    def test_the_writer_does_not_verify_signatures_on_every_mutation(
+        self, tmp_path: Path,
+    ) -> None:
+        """What the writer checks, and what it deliberately leaves alone.
+
+        Asking the full chain question here cost a signature verification per
+        link on every write, which grows with the graph and is paid by work
+        that has nothing to do with verdicts. Structure is cheap and catches
+        the file being unusable; a forged signature on a well-formed chain
+        travels into the file, and the restore refuses it there.
+        """
+        root_key, _witnesses, _ = _graph_with_verdicts(tmp_path, count=3)
+        _unguard(tmp_path)
+        conn = _raw(tmp_path)
+        # A signature the issuer never produced, on a link that still links.
+        conn.execute(
+            "UPDATE verdict_chain SET signature = X'00' WHERE seq = 3"
+        )
+        conn.commit()
+        conn.close()
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.assert_claim("an ordinary later claim")
+
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        assert "verdict_chain_withheld" not in doc, (
+            "the writer verified a signature it was not supposed to"
+        )
+        assert len(doc["verdict_chain"]) == 3
+
+        import shutil
+        shutil.rmtree(tmp_path / ".mareforma")
+        with pytest.raises(RestoreError) as caught:
+            restore(tmp_path)
+        assert caught.value.kind == "verdict_chain_broken", (
+            "the forgery travelled into the file and nothing stopped it"
+        )
 
     @pytest.mark.parametrize("edit, match", [
         # A section set to a scalar. The sort helpers call .items() on it.
@@ -1136,11 +1548,11 @@ class TestItSurvivesRecovery:
             "nothing"
         )
         edit(data)
-        toml_path.write_text(tomli_w.dumps(data))
+        rewrite_backup(toml_path, data)
 
         shutil.rmtree(tmp_path / ".mareforma")
         with pytest.raises(RestoreError, match=match):
-            restore(tmp_path)
+            restore(tmp_path, trust_unaccounted_backup=True)
 
 
 class TestAFailedVerdictWriteClosesItsTransaction:
@@ -1307,3 +1719,88 @@ class TestTheWriterDoesNotGoQuiet:
         with mareforma.open(tmp_path, key_path=key) as g:
             g.assert_claim("a claim whose backup degrades quietly")
         assert "ERROR: claims.toml backup failed" in capsys.readouterr().err
+
+
+class TestTheBackupDoesNotCarryPoison:
+    """The recovery the accepted risk rested on, made to work.
+
+    The chain table takes rows and will not give them up, so a link whose
+    signature does not verify turns the trust root tampered for every claim and
+    nothing removes it. That was accepted as wrecking a graph rather than making
+    a false claim read true, because the operator still has the backup.
+
+    Measured, they did not: the next backup copied the row into claims.toml and
+    the recovery replayed the thing it was meant to escape. The backup now stops
+    at the first link that does not check out and says how many it left.
+    """
+
+    def _poisoned(self, tmp_path: Path) -> Path:
+        root_key, _, _ = _graph_with_verdicts(tmp_path, count=2)
+        conn = _raw(tmp_path)
+        conn.execute(
+            "INSERT INTO verdict_chain(seq, prev_tip, tip, verdict_kind, "
+            "verdict_id, verdict_digest, issuer_keyid, signature, created_at) "
+            "VALUES (99, 'x', 'junk', 'contradiction', 'nope', 'nope', "
+            "'nokey', X'00', '2026-09-07T00:00:00+00:00')"
+        )
+        conn.commit()
+        conn.close()
+        # One ordinary mutation, which is all it took for the backup to carry it.
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            g.assert_claim("written after the plant", generated_by="after")
+        return root_key
+
+    def test_the_live_graph_is_still_wrecked(self, tmp_path: Path) -> None:
+        """Pinned, so nobody reads this as the denial of service being closed.
+
+        It is not. The row is still there and still unremovable. What changed is
+        that the file the operator recovers from no longer carries it.
+        """
+        root_key = self._poisoned(tmp_path)
+        with mareforma.open(tmp_path, key_path=root_key) as g:
+            assert verify_verdict_chain(g._conn)
+
+    def test_the_backup_leaves_it_out_and_says_so(self, tmp_path: Path) -> None:
+        self._poisoned(tmp_path)
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        assert "99" not in doc.get("verdict_chain", {})
+        assert doc["verdict_chain_withheld"] == 1
+        # A scalar, so the row counts are unmoved by it.
+        assert "verdict_chain_withheld" not in doc["completeness"]["sections"]
+
+    def test_restoring_it_gives_back_a_working_graph(
+        self, tmp_path: Path,
+    ) -> None:
+        """The whole point, and what it costs to get it.
+
+        The file is short, so it is refused first: an operator whose backup
+        cannot carry its own chain should hear that before they rebuild from
+        it. Taking the override gives back a graph that opens and verifies,
+        which is what the old writer could not offer at any price. Before this,
+        the override replayed the poison and the recovery was wrecked too.
+        """
+        root_key = self._poisoned(tmp_path)
+        target = tmp_path / "recovered"
+        target.mkdir()
+        import shutil
+        shutil.copy(tmp_path / "claims.toml", target / "claims.toml")
+
+        with pytest.raises(RestoreError) as caught:
+            restore(target)
+        assert caught.value.kind == "verdict_chain_cut_short"
+        assert not (target / ".mareforma").exists()
+
+        report = restore(target, trust_unaccounted_backup=True)
+        assert report["claims_restored"] == 5
+        assert report["verdict_chain_withheld"] == 1, (
+            "the report did not carry the count, so no caller can act on it"
+        )
+        with mareforma.open(target, key_path=root_key) as g:
+            assert verify_verdict_chain(g._conn) == ()
+
+    def test_an_honest_backup_withholds_nothing(self, tmp_path: Path) -> None:
+        """The direction that matters more: a healthy chain is written whole."""
+        _graph_with_verdicts(tmp_path, count=3)
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text())
+        assert len(doc["verdict_chain"]) == 3
+        assert "verdict_chain_withheld" not in doc

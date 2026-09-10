@@ -18,9 +18,9 @@ Wraps the JSON-LD graph export in an in-toto Statement v1 envelope:
 
 The bundle is then signed by the local Ed25519 key using a DSSE-style
 envelope. Verification checks the bundle signature, every per-claim
-asserter signature (bound to the claim's presented content), and the
-displayed support level: ESTABLISHED against a validator-signed
-validation envelope, REPLICATED against distinct-signer corroboration.
+asserter signature (bound to the claim's presented content), and every
+validation envelope a node carries, against the validator set the bundle
+itself declares.
 Editorial status (``retracted`` / ``contested``) and comparison
 summaries are exporter-attested only: the data model records no
 signature for a status change, so a verified bundle does not attest
@@ -125,14 +125,12 @@ def build_statement(root: Path) -> dict[str, Any]:
         single_trust_domain = _validators.single_trust_domain(conn)
         trust_domain_root = _validators.trust_domain_root(conn)
         validator_rows = _validators.list_validators(conn)
-        # Carried for the same reason the enrollment envelopes are: without
-        # them the bundle cannot tell an honest REPLICATED from an inflated
-        # one, because a signed replication verdict is one of the two things
-        # that earns the level and nothing else in the bundle records it. In
-        # audit mode, so a verdict whose claim was later invalidated still
-        # travels: a promotion that happened is a fact about the past, and
-        # dropping it would make the bundle unable to explain a level the graph
-        # legitimately granted.
+        # Carried for the same reason the enrollment envelopes are: a signed
+        # replication verdict is evidence a reader can check, and nothing else
+        # in the bundle records that it was ever issued. In audit mode, so a
+        # verdict whose claim was later invalidated still travels: a verdict
+        # somebody signed is a fact about the past, and dropping it would leave
+        # the bundle unable to explain what the graph was told.
         verdict_rows = list_replication_verdicts(conn, include_invalidated=True)
     finally:
         conn.close()
@@ -155,17 +153,16 @@ def build_statement(root: Path) -> dict[str, Any]:
             bundle_json = sig_by_claim.get(cid)
             if bundle_json:
                 node["signatureBundle"] = json.loads(bundle_json)
-            # An ESTABLISHED claim's promotion is attested by a validator's
-            # signed validation (or seed) envelope; carry it so verify_bundle
-            # can confirm the displayed support level, not just trust the
-            # exporter for it.
+            # A validator's signed validation (or seed) envelope, carried so
+            # verify_bundle can confirm the attestation binds to this claim
+            # rather than trusting the exporter for it.
             val_json = val_by_claim.get(cid)
             if val_json:
                 node["validationSignature"] = json.loads(val_json)
     # Disclose the validator topology of the exporting graph: singleTrustDomain
     # is true when every validator traces to one root of trust. It labels
-    # trust-domain concentration over the ESTABLISHED rows in this bundle; it is
-    # a disclosure, not a Sybil guard over the participant topology.
+    # trust-domain concentration across this bundle; it is a disclosure, not a
+    # Sybil guard over the participant topology.
     predicate = {
         **predicate,
         "mare:singleTrustDomain": single_trust_domain,
@@ -332,8 +329,8 @@ def _verify_exported_validators(
 
     Returns (keyid -> public-key, keyid -> validator_type, root). The type
     comes from the enrollment payload the parent signed, so it is as
-    trustworthy as the key it accompanies, and the ESTABLISHED check needs it
-    to enforce the human-witnessed rule the graph enforces in process.
+    trustworthy as the key it accompanies, and the validation check needs it
+    to enforce the human-signer rule the graph enforces in process.
 
     Each enrollment envelope is verified against its parent's pubkey (the root
     is self-verified), mirroring the restore path, and every validator must
@@ -399,173 +396,18 @@ def _verify_exported_validators(
     return verified, verified_types, root
 
 
-def _string_supports(supports: Any) -> list[str]:
-    """The string entries of a node's ``supports``, ignoring anything else.
-
-    A hand-crafted bundle could carry a non-list or nested/unhashable supports
-    value; this keeps the distinct-signer pre-pass and REPLICATED check within
-    the module's ``BundleVerificationError`` contract instead of leaking a
-    TypeError. A malformed supports value simply contributes no upstream.
-    """
-    if not isinstance(supports, list):
-        return []
-    return [s for s in supports if isinstance(s, str)]
-
-
-def _verified_replication_verdicts(
-    predicate: dict, verified_validators: dict, asserters: dict,
-) -> "dict[str, set]":
-    """Replication verdicts that verify, grouped by the claim each names.
-
-    The bundle now carries them, so the verdict path a live promotion can take
-    is checkable offline instead of invisible. Each is held against the same bar
-    the recording path applies and the read path re-applies: the issuer must be
-    a validator whose enrollment chain verified in this bundle, and the
-    signature must verify over the DSSE PAE rebuilt from the carried fields. A
-    verdict that fails names nobody, exactly as ``_verdict_verifies`` treats it
-    on the live path.
-
-    Never raises. A malformed verdict is not evidence, and it must not take a
-    bundle down: what it costs is the claim it would have backed, which then has
-    to stand on the convergence path or fail.
-    """
-    from mareforma.db import _replication_verdict_pae
-
-    by_claim: "dict[str, set]" = {}
-    for v in predicate.get("mare:replicationVerdicts", []) or []:
-        try:
-            issuer = v["issuer_keyid"]
-            if issuer not in verified_validators:
-                continue
-            record = {
-                "verdict_id": v["verdict_id"],
-                "cluster_id": v["cluster_id"],
-                "member_claim_id": v["member_claim_id"],
-                "other_claim_id": v["other_claim_id"],
-                "method": v["method"],
-                "confidence": v.get("confidence") or {},
-            }
-            # The map holds a loaded public key, not a PEM: it is built by
-            # _verify_exported_validators, which has already chain-verified it.
-            verified_validators[issuer].verify(
-                base64.standard_b64decode(v["signature"]),
-                _replication_verdict_pae(record),
-            )
-        except Exception:
-            continue
-        named = [c for c in (v.get("member_claim_id"), v.get("other_claim_id"))
-                 if c]
-        # Entitlement, the question a signature cannot answer. The recording
-        # path, the live read path and restore all refuse a verdict issued by a
-        # key that signed the claim it names, and this is the artifact whose
-        # whole point is being checkable offline by somebody holding nothing
-        # else. Both keyids are already in the bundle, so it costs a lookup.
-        if any(issuer in asserters.get(cid, ()) for cid in named):
-            continue
-        for cid in named:
-            by_claim.setdefault(cid, set()).add(v["verdict_id"])
-    return by_claim
-
-
-def _distinct_artifact(own_hash: "str | None", peer_hash: "str | None") -> bool:
-    """The graph's artifact-hash term, restated: two NULLs are not one artifact.
-
-    ``_QUALIFYING_PEER_SQL`` disqualifies a peer only when both hashes are
-    present and equal, because a missing hash records that no artifact was
-    named, not that the same one was. Reading it as "the hashes must differ"
-    rejects every honest convergence between two claims that recorded no
-    artifact, which is the ordinary case for a text finding.
-    """
-    return own_hash is None or peer_hash is None or peer_hash != own_hash
-
-
-def _verify_replicated_level(
-    node: dict, claim_id: str, support_peers: dict,
-    established_anchors: set, verified_verdicts: dict,
-) -> None:
-    """Refuse a displayed REPLICATED the bundle's own material does not back.
-
-    The two paths are the graph's, not this file's. ``_CorroborationIndex``
-    holds that a stored REPLICATED is legitimate on either an enrolled
-    validator's signed replication verdict naming the claim, or convergence: a
-    shared ESTABLISHED anchor with a peer under a distinct asserter key and a
-    different artifact hash. This applied neither. It asked only whether two
-    distinct asserters shared any upstream, which is weaker than convergence in
-    three ways and blind to the verdict path in full.
-
-    Being blind to the verdict path was the worse half, because it was a false
-    rejection rather than a permissive one: a claim the graph promoted on a
-    signed verdict, exported and then handed to this verifier, raised. mareforma
-    produced bundles it refused to verify.
-
-    One condition of convergence is NOT re-applied here and the bundle cannot
-    apply it: the observed-grounding gate, whose column no node carries. So this
-    is the graph's rule minus that term, which makes it a weaker check than the
-    read path rather than a different one, and the difference is stated rather
-    than papered over.
-    """
-    if verified_verdicts.get(claim_id):
-        return
-    own = _node_asserter(node)
-    own_hash = node.get("artifactHash")
-    for sup in _string_supports(node.get("supports")):
-        if sup not in established_anchors:
-            continue
-        # Both terms on the SAME peer. Asking whether some peer has a distinct
-        # key and some peer has a distinct artifact would pass on two peers that
-        # each satisfy one, which is not a corroboration by anybody.
-        for peer_key, peer_hash in support_peers.get(sup, ()):
-            if peer_key != own and _distinct_artifact(own_hash, peer_hash):
-                return
-    raise BundleVerificationError(
-        f"claim:{claim_id} is shown REPLICATED but this bundle carries "
-        "neither a replication verdict that verifies against an enrolled "
-        "issuer nor a shared ESTABLISHED anchor with a distinct-signer peer "
-        "on a different artifact hash"
-    )
-
-
-def _node_signers(node: dict) -> "set[str]":
-    """Every keyid that signed a node's own envelope.
-
-    The entitlement rule this feeds is ``_refuse_self_verdict``, which walks
-    every signature through ``_claim_signer_keyids`` so a planner, executor or
-    reviewer on a roles envelope cannot also issue a verdict on the claim they
-    signed. Reading only the first signature would hold the bundle to a
-    narrower rule than the graph it is a copy of.
-    """
-    try:
-        signatures = node["signatureBundle"]["signatures"]
-    except (KeyError, TypeError):
-        return set()
-    if not isinstance(signatures, list):
-        return set()
-    return {
-        sig["keyid"] for sig in signatures
-        if isinstance(sig, dict) and isinstance(sig.get("keyid"), str)
-    }
-
-
-def _node_asserter(node: dict) -> "str | None":
-    """The keyid on a node's own asserter bundle, or None."""
-    try:
-        return node["signatureBundle"]["signatures"][0]["keyid"]
-    except (KeyError, IndexError, TypeError):
-        return None
-
-
-def _verify_established_level(
+def _verify_validation_attestation(
     node: dict, claim_id: str, verified_validators: dict,
     validator_types: dict, _signing,
 ) -> None:
-    """Confirm a node displayed as ESTABLISHED carries a validator-signed
-    promotion for THIS claim, so the exporter cannot inflate a claim's support
-    level. Mirrors the validation-envelope checks the restore path applies."""
+    """Confirm a node's validation envelope names THIS claim and a validator
+    who could have signed it, so the exporter cannot present a human's sign-off
+    it did not earn. Mirrors the checks the restore path applies."""
     vs = node.get("validationSignature")
     if not vs:
         raise BundleVerificationError(
-            f"claim:{claim_id} is shown ESTABLISHED but carries no validation "
-            "signature"
+            f"claim:{claim_id} is presented as validated but carries no "
+            "validation signature"
         )
     try:
         val_keyid = vs["signatures"][0]["keyid"]
@@ -587,13 +429,13 @@ def _verify_established_level(
             f"claim:{claim_id} validation signed by {str(val_keyid)[:12]}… "
             "which is not a chain-verified validator"
         )
-    # ESTABLISHED means a human-typed validator witnessed the claim. The graph
-    # refuses an llm-typed promotion in process; the bundle carries the
+    # A validation means a human-typed validator signed off on the claim. The
+    # graph refuses an llm-typed signer in process; the bundle carries the
     # enrollment-bound validator_type, so the verifier refuses it too.
     if validator_types.get(val_keyid) == "llm":
         raise BundleVerificationError(
-            f"claim:{claim_id} is shown ESTABLISHED but its validation is "
-            f"signed by {str(val_keyid)[:12]}…, enrolled with "
+            f"claim:{claim_id} is presented as validated but its validation "
+            f"is signed by {str(val_keyid)[:12]}…, enrolled with "
             "validator_type='llm'"
         )
     try:
@@ -628,15 +470,14 @@ def _verify_established_level(
             f"{str(val_keyid)[:12]}…"
         )
     # Self-validation refusal, kept in step with the live read and restore paths
-    # (:func:`mareforma.db.core._refuse_self_validation`). A validator promotion
-    # needs a witnessing validator whose keyid does NOT appear on the claim's own
-    # envelope: the validator that signs the promotion must not also be the
-    # asserter or a role signer of the claim it promotes. This release added the
+    # (:func:`mareforma.db.core._refuse_self_validation`). A validation needs a
+    # witnessing validator whose keyid does NOT appear on the claim's own
+    # envelope: the validator that signs it must not also be the asserter or a
+    # role signer of the claim it signs off on. This release added the
     # refusal to restore and not here, so the detached verifier accepted a
-    # self-promoted ESTABLISHED row the other two paths refuse; the three rules
-    # must agree. SEED envelopes are exempt, exactly as restore exempts them: a
-    # born-ESTABLISHED claim is attested by its own asserter by design and never
-    # climbs the ladder.
+    # self-validated row the other two paths refuse; the three rules must
+    # agree. SEED envelopes are exempt, exactly as restore exempts them: a
+    # seeded claim is attested by its own asserter by design.
     if declared == _signing.PAYLOAD_TYPE_VALIDATION:
         claim_sig = node.get("signatureBundle")
         if isinstance(claim_sig, dict):
@@ -644,9 +485,9 @@ def _verify_established_level(
                 if isinstance(entry, dict) and entry.get("keyid") == val_keyid:
                     role = entry.get("role") or "asserter"
                     raise BundleVerificationError(
-                        f"claim:{claim_id} is shown ESTABLISHED but its validation "
-                        f"is signed by {str(val_keyid)[:12]}…, who also signed the "
-                        f"claim as {role!r}; self-promotion is refused"
+                        f"claim:{claim_id} is presented as validated but its "
+                        f"validation is signed by {str(val_keyid)[:12]}…, who also "
+                        f"signed the claim as {role!r}; self-validation is refused"
                     )
 
 
@@ -702,7 +543,7 @@ def verify_bundle(
         )
     except InvalidSignature as exc:
         raise BundleVerificationError(
-            "bundle:signature verification failed — bundle has been tampered"
+            "bundle:signature verification failed, the bundle has been tampered"
         ) from exc
 
     # Parse the verified Statement.
@@ -744,46 +585,6 @@ def verify_bundle(
             f"bundle:signed by {keyid[:12]}… but the validators chain to root "
             f"{str(trust_root)[:12]}…; a bundle must be signed by its root"
         )
-    # Map each support value to the distinct chain-verified asserters that carry
-    # a claim supporting it. A REPLICATED display is checked against this for
-    # the distinct-signer corroboration that support level requires. Necessary
-    # condition, so a genuine REPLICATED never false-rejects; it forbids a lone
-    # claim from displaying REPLICATED with no independent corroborator.
-    # Two indexes over the bundle's own nodes, for the convergence half of the
-    # REPLICATED rule: which distinct signer-and-artifact pairs sit on each
-    # upstream, and which upstreams are ESTABLISHED. The rule the graph enforces
-    # needs the pair, so an index of signers alone was dropped with the weaker
-    # check it fed.
-    support_peers: dict[str, set] = {}
-    established_anchors: set = set()
-    for n in nodes:
-        if not n.get("@id", "").startswith("mare:claim/"):
-            continue
-        if n.get("supportLevel") == "ESTABLISHED":
-            established_anchors.add(n["@id"][len("mare:claim/"):])
-        n_asserter = _node_asserter(n)
-        if n_asserter is None or n_asserter not in verified_validators:
-            continue
-        for sup in _string_supports(n.get("supports")):
-            support_peers.setdefault(sup, set()).add(
-                (n_asserter, n.get("artifactHash")))
-    # Accumulated per claim rather than assigned, because two nodes can carry
-    # the same @id and a comprehension would let the later one replace what the
-    # earlier one said about who signed that claim, which is a way to hide a
-    # signer from the check below.
-    asserters: "dict[str, set[str]]" = {}
-    for n in nodes:
-        if not isinstance(n, dict):
-            continue
-        node_id = str(n.get("@id", ""))
-        if not node_id.startswith("mare:claim/"):
-            continue
-        asserters.setdefault(
-            node_id[len("mare:claim/"):], set()
-        ).update(_node_signers(n))
-    verified_verdicts = _verified_replication_verdicts(
-        predicate, verified_validators, asserters,
-    )
     for node in nodes:
         node_id = node.get("@id", "")
         if not node_id.startswith("mare:claim/"):
@@ -859,23 +660,19 @@ def verify_bundle(
         if asserter_digest != subjects.get(subject_name):
             raise BundleVerificationError(
                 f"claim:{claim_id} asserter signature does not cover the "
-                "presented content — text or evidence differs from what "
+                "presented content: text or evidence differs from what "
                 "was signed"
             )
-        # Support level: verify the DISPLAYED level is backed by signed
-        # material, so the exporter cannot inflate it. ESTABLISHED needs a
-        # validator-signed validation envelope for this claim; REPLICATED needs
-        # distinct-signer corroboration on a shared upstream. Editorial status
-        # (retracted/contested) and comparison summaries are NOT attested here,         # they carry no signature in the data model (see the module docstring).
-        level = node.get("supportLevel", "PRELIMINARY")
-        if level == "ESTABLISHED":
-            _verify_established_level(
+        # A validation attestation is verified whenever the node carries one.
+        # It used to be verified only on a node the exporter displayed at the
+        # top of a ladder, which stopped meaning anything the moment that left
+        # the export: the gate read a key that is never present, every node
+        # took the other branch, and a bundle carried a human's sign-off that
+        # nothing checked. The envelope is the thing being attested to, so its
+        # presence is what asks the question.
+        if node.get("validationSignature"):
+            _verify_validation_attestation(
                 node, claim_id, verified_validators, validator_types, _signing,
-            )
-        elif level == "REPLICATED":
-            _verify_replicated_level(
-                node, claim_id, support_peers, established_anchors,
-                verified_verdicts,
             )
         # Re-derive the canonical Statement v1 hash from the @graph
         # node. evidence is part of the signed predicate, so the
@@ -895,7 +692,7 @@ def verify_bundle(
         expected = hashlib.sha256(chain_input).hexdigest()
         if subjects[subject_name] != expected:
             raise BundleVerificationError(
-                f"statement:subject digest mismatch for {claim_id!r} — "
+                f"statement:subject digest mismatch for {claim_id!r}: "
                 "bundle contents have been tampered"
             )
     return statement

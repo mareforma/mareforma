@@ -25,12 +25,12 @@ class ScanCeilingReached(DatabaseError):
 class UnverifiedClaimError(MareformaError):
     """Raised when an export is asked to publish a claim that failed verify-on-read.
 
-    The interop exports (JSON-LD, PROV-O, RO-Crate) carry a claim's
-    ``support_level`` off the machine, where nothing re-checks it. A REPLICATED
-    or ESTABLISHED row whose signature does not re-verify must not leave with
-    that level attached, and demoting it silently would hide the tamper, so the
-    export refuses and names the rows. Run ``mareforma verify <claim_id>`` for
-    the detail, then retract or repair the row.
+    The interop exports (JSON-LD, PROV-O, RO-Crate) carry a claim's signed
+    material off the machine, where nothing re-checks it. A row whose
+    signature does not re-verify must not leave carrying that material, and
+    stripping it silently would hide the tamper, so the export refuses and
+    names the rows. Run ``mareforma verify <claim_id>`` for the detail, then
+    retract or repair the row.
     """
 
 
@@ -66,7 +66,7 @@ class IllegalStateTransitionError(MareformaError):
 
     The trigger raises ``mareforma:state:<suffix>`` strings via
     ``RAISE(ABORT, ...)``, where the suffix is a static literal such as
-    ``illegal_transition:from_preliminary``: ``RAISE()`` cannot
+    ``retracted_is_terminal``: ``RAISE()`` cannot
     concatenate a column value below SQLite 3.46. Python catches the
     resulting ``sqlite3.IntegrityError`` and re-raises this exception
     with the parsed suffix so callers can pattern-match on it instead
@@ -86,24 +86,23 @@ class ChainIntegrityError(MareformaError):
 
 
 class LLMValidatorPromotionError(MareformaError):
-    """Raised when a validator with ``validator_type='llm'`` attempts
-    a promotion past REPLICATED.
+    """Raised when a validator with ``validator_type='llm'`` attempts to
+    sign off on a claim.
 
-    The trust ladder treats human validators as the only path to
-    ESTABLISHED. An LLM-typed validator may enroll and may sign
-    validation envelopes, but those envelopes cannot promote a claim
-    past REPLICATED. To promote, the claim must be co-signed (or
-    re-signed) by an enrolled human validator.
+    A validation is a human's statement that they read the evidence. An
+    LLM-typed validator may enroll and may sign validation envelopes, and
+    recording one on a claim is refused. An enrolled human validator has to
+    sign it instead.
     """
 
 
 class SelfValidationError(MareformaError):
-    """Raised when a validator attempts to promote a claim it signed itself.
+    """Raised when a validator attempts to sign off on a claim it signed itself.
 
     Self-validation is the trivial-loop attack: an agent asserts a claim
-    under its own key, then promotes that same claim to ESTABLISHED under
-    the same key. The trust ladder rests on the principle that promotion
-    is an *external* witnessing event. ``validate_claim`` compares the
+    under its own key, then signs off on that same claim under the same key.
+    A validation is worth something only as an *external* statement about
+    somebody else's work. ``validate_claim`` compares the
     signing keyid of the validation envelope with the keyid recorded in
     the claim's ``signature_bundle`` and refuses when they match.
     """
@@ -113,7 +112,7 @@ class EvidenceCitationError(MareformaError):
     """Raised when ``evidence_seen`` on a validation envelope is malformed.
 
     ``validate_claim`` accepts an ``evidence_seen`` list of claim_ids the
-    validator declares to have reviewed before signing the promotion.
+    validator declares to have reviewed before signing the validation.
     Mareforma cannot prove the validator actually opened those claims,
     but it CAN verify that every cited entry is a strict-v4 UUID pointing
     at an existing claim with ``created_at <= validated_at``. Any failure
@@ -150,7 +149,7 @@ class InvalidValidationEnvelopeError(MareformaError):
       * envelope fails Ed25519 verification against the claimed signer's
         public key (cryptographic forgery or wrong signer),
       * envelope's payload binds a different ``claim_id`` than the row
-        being promoted (replay across claims),
+        being validated (replay across claims),
       * envelope's payload binds a ``validator_keyid`` that does not
         equal the signing keyid (internal inconsistency),
       * envelope's payload's timestamp (``validated_at`` for validation
@@ -184,6 +183,18 @@ class RestoreError(MareformaError):
       - ``'policy_unverifiable'``      : enforced policy has no pinned Rekor log key
       - ``'policy_unverified'``        : project_policy envelope fails verify
       - ``'policy_violation'``         : rebuilt row breaks the signed policy
+      - ``'backup_unaccounted'``       : the file does not hold what its
+        completeness table says it holds
+      - ``'format_ahead'``             : written in a backup format later
+        than this release understands
+      - ``'verdict_chain_broken'``     : a verdict was taken out of the
+        backup and the chain no longer accounts for the set
+      - ``'verdict_chain_cut_short'``  : the backup says its own writer
+        could not write the chain in full, so it is short of links the
+        graph it came from still holds. Takes the same override, which
+        rebuilds from the part that holds.
+      - ``'grounding_unattested'``     : a GROUNDED axis arrived with
+        nothing in the file attesting it
       - ``'rekor_inclusion_invalid'``  : Rekor inclusion entry or proof invalid
     """
 

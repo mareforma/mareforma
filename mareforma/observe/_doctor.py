@@ -47,7 +47,7 @@ _KNOWN_BOUNDS = (
     "separate interpreter. Every start method (fork, spawn, forkserver) is "
     "seamed at process start, so the read lands OPAQUE via the subprocess seam.",
     "Foreign-runtime readers (R, Julia, a CLI subprocess) are OPAQUE, not "
-    "GROUNDED — the observer instruments Python I/O only.",
+    "GROUNDED, because the observer instruments Python I/O only.",
     "For a plain file, GROUNDED means the cited file was opened and is non-empty; "
     "the file path proxies flow by size, it does not prove the bytes were read.",
 )

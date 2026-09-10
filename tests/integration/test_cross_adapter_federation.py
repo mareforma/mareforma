@@ -151,7 +151,7 @@ class TestCrossHostConvergence:
         distinct non-NULL asserter keyids.
 
         The keyid axis is the one a merge counts on: promotion turns on a
-        shared ESTABLISHED anchor plus distinct non-NULL ``asserter_keyid``,
+        shared anchor plus distinct non-NULL ``asserter_keyid``,
         never on equal text or an equal predicate payload. Cryptographic
         envelope cross-host replay is exercised by the signing/restore suite.
         """

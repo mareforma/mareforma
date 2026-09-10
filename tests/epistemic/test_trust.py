@@ -1,12 +1,10 @@
 """
 tests/epistemic/test_trust.py: trust-layer correctness tests.
 
-The successor to test_trust_ladder.py: where that file documents the old
-support-level ladder, this validates the count-based trust layer that replaces
-it. The graph tests are epistemic-correctness tests in the same spirit as
-test_support_levels.py (the derived signals must be honest under independent and
-contradictory evidence); the rest are unit tests of the primitives that produce
-those signals.
+This validates the count-based trust layer: the derived signals have to be
+honest under independent and contradictory evidence. The graph tests are
+epistemic-correctness tests in that spirit; the rest are unit tests of the
+primitives that produce the signals.
 
 Scenarios covered
 -----------------
@@ -408,7 +406,7 @@ class TestSuccessCriteria:
         assert after_refute["status"] == Status.REFUTED.value
         assert after_support["status"] == Status.CONTESTED.value
 
-    def test_opposite_findings_surface_frame_contest(self, tmp_path: Path) -> None:
+    def test_opposite_findings_surface_a_divided_question(self, tmp_path: Path) -> None:
         down = Proposition("X", "affects", "Y", Direction.DECREASES, {"pop": "P"})
         up = Proposition("X", "affects", "Y", Direction.INCREASES, {"pop": "P"})
         with open_graph(tmp_path) as graph:
@@ -422,18 +420,20 @@ class TestSuccessCriteria:
             )
             sd = graph.proposition_status(down)
             su = graph.proposition_status(up)
-        assert sd["frame_status"] == FrameStatus.CONTESTED.value
-        assert su["frame_status"] == FrameStatus.CONTESTED.value
+        assert sd["question_status"] == QuestionStatus.DIVIDED.value
+        assert su["question_status"] == QuestionStatus.DIVIDED.value
         # neither is silently corroborated; each stands at PRELIMINARY on its own row
         assert sd["status"] == Status.PRELIMINARY.value
         assert su["status"] == Status.PRELIMINARY.value
 
-    def test_opposite_findings_carry_both_status_keys(self, tmp_path: Path) -> None:
-        # The view carries the retired frame_status ("contested") and the
-        # successor question_status ("divided") side by side, each on its own
-        # vocabulary, both derived from one frame computation so they agree on
-        # the underlying fact (the frame is contested) while wording it in their
-        # own axis.
+    def test_the_question_is_the_only_status_key_the_view_carries(
+        self, tmp_path: Path,
+    ) -> None:
+        # The view used to carry frame_status ("contested") beside
+        # question_status ("divided"). The first echoed the answer's own status
+        # word and said nothing the answer had not already said, so it is gone
+        # and the question axis is what remains. Two words for one fact is a
+        # reader deciding which to believe.
         down = Proposition("X", "affects", "Y", Direction.DECREASES, {"pop": "P"})
         up = Proposition("X", "affects", "Y", Direction.INCREASES, {"pop": "P"})
         with open_graph(tmp_path) as graph:
@@ -446,18 +446,18 @@ class TestSuccessCriteria:
                 data_id="dB", generated_by="b",
             )
             sd = graph.proposition_status(down)
-        assert sd["frame_status"] == FrameStatus.CONTESTED.value
         assert sd["question_status"] == QuestionStatus.DIVIDED.value
+        assert "frame_status" not in sd
 
-    def test_uncontested_frame_reads_consistent_on_both_keys(self, tmp_path: Path) -> None:
+    def test_an_uncontested_question_reads_consistent(self, tmp_path: Path) -> None:
         with open_graph(tmp_path) as graph:
             graph.assert_finding(
                 _prop(), _superiority(DirectionOfInterest.DECREASE), _smd(-2.5, p=0.004),
                 data_id="dA", generated_by="a",
             )
             s = graph.proposition_status(_prop())
-        assert s["frame_status"] == FrameStatus.CONSISTENT.value
         assert s["question_status"] == QuestionStatus.CONSISTENT.value
+        assert "frame_status" not in s
 
     def test_legacy_claims_coexist(self, tmp_path: Path) -> None:
         with open_graph(tmp_path) as graph:

@@ -1,12 +1,11 @@
-"""tests/test_artifact_hash.py — SHA256 artifact-hash gate for REPLICATED.
+"""tests/test_artifact_hash.py: the SHA256 artifact-hash collapse check.
 
 Covers:
   - normalize_artifact_hash format check (length, hex, case)
   - artifact_hash is part of the signed payload (tamper-evidence)
-  - EQUAL non-NULL artifact_hash is an opt-in COLLAPSE signal: two converging
-    claims with the same hash collapse to one line and do NOT promote (v0.3.7
-    inverts the old "hashes must agree to converge" gate)
-  - distinct or absent hashes never block: REPLICATED then runs on distinct-
+  - the hash is a data-distinctness signal a caller records; the promotion
+    gate that read it is gone with the ladder
+  - distinct or absent hashes never block: the count then runs on distinct-
     signer convergence alone
   - a non-colliding third peer lifts a collapsed pair
   - CLI ``--artifact-hash`` flag round-trips through ``claim show --json``
@@ -172,217 +171,7 @@ class TestArtifactHashSigned:
 
 
 # ---------------------------------------------------------------------------
-# REPLICATED gating, opt-in hash agreement
-# ---------------------------------------------------------------------------
-
-class TestReplicatedHashGate:
-    def test_equal_hashes_collapse_and_do_not_promote(self, open_graph, tmp_path) -> None:
-        """v0.3.7 inverts the hash signal: EQUAL non-NULL artifact_hash is a
-        COLLAPSE, not a convergence reward. Two converging claims with the same
-        hash collapse to one line and stay PRELIMINARY — even with distinct
-        signers, which would otherwise replicate. Distinct signers are supplied
-        here precisely to isolate the hash effect (so the non-promotion is the
-        collapse, not a missing-signer artefact)."""
-        sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "agent A finding", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        b = open_graph.assert_claim(
-            "agent B finding", supports=[upstream],
-            generated_by="agent-B", artifact_hash=HASH_A, signer=sb,
-        )
-        assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
-
-    def test_mismatched_hashes_do_not_block_replicated(
-        self, open_graph, tmp_path,
-    ) -> None:
-        """Only EQUAL non-NULL hashes collapse: a mismatched pair is exactly
-        what the clause lets through, so promotion runs on signer convergence.
-        Distinct signers supply the WHO axis, leaving the hashes as the only
-        thing under test."""
-        sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "agent A finding", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        b = open_graph.assert_claim(
-            "agent B finding", supports=[upstream],
-            generated_by="agent-B", artifact_hash=HASH_B, signer=sb,
-        )
-        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_one_side_missing_hash_falls_back_to_identity_only(
-        self, open_graph, tmp_path,
-    ) -> None:
-        """Back-compat: if EITHER peer lacks a hash, the hashes are not EQUAL
-        non-NULL, so the collapse does not fire and REPLICATED still promotes on
-        signer convergence. The hash signal is opt-in: an absent hash never
-        blocks. Distinct signers supply the WHO axis the promotion keys on."""
-        sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "agent A finding", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        b = open_graph.assert_claim(
-            "agent B finding (no hash)", supports=[upstream],
-            generated_by="agent-B", signer=sb,
-        )
-        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_neither_has_hash_legacy_path_preserved(self, open_graph, tmp_path) -> None:
-        """Neither peer carries a hash, so there is no EQUAL non-NULL collapse:
-        promotion runs on signer convergence alone. Distinct signers promote."""
-        sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "agent A finding", supports=[upstream], generated_by="agent-A", signer=sa,
-        )
-        b = open_graph.assert_claim(
-            "agent B finding", supports=[upstream], generated_by="agent-B", signer=sb,
-        )
-        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_docstrings_state_the_collapse_rule(self) -> None:
-        """The two in-code surfaces must not sell the retired agreement gate.
-
-        A reader who follows "the hashes must match for REPLICATED to fire"
-        supplies matching hashes and gets the opposite outcome: the pair
-        collapses to one line and never promotes, as the test above pins.
-        """
-        for fn in (_db.normalize_artifact_hash, _db.add_claim):
-            text = " ".join((fn.__doc__ or "").split())
-            assert "must match" not in text and "must agree" not in text, (
-                f"{fn.__name__} still documents the retired hash-agreement gate"
-            )
-            assert "collapse" in text, (
-                f"{fn.__name__} must state the collapse rule the gate applies"
-            )
-
-    def test_third_peer_breaks_a_collapsed_pair(
-        self, open_graph, tmp_path,
-    ) -> None:
-        """Under the inverted gate, an EQUAL-hash pair collapses and is held at
-        PRELIMINARY even with distinct signers. A third peer C with a distinct
-        signer and NO hash (so no collapse against either) converges on the
-        shared upstream and breaks the deadlock: it replicates with each prior
-        peer, promoting the whole set. The collapse is a per-pair signal that a
-        non-colliding peer lifts."""
-        ka = tmp_path / "_sa.key"
-        kb = tmp_path / "_sb.key"
-        kc = tmp_path / "_sc.key"
-        for k in (ka, kb, kc):
-            _signing.bootstrap_key(k)
-        sa = _signing.load_private_key(ka)
-        sb = _signing.load_private_key(kb)
-        sc = _signing.load_private_key(kc)
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "agent A", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        b = open_graph.assert_claim(
-            "agent B", supports=[upstream],
-            generated_by="agent-B", artifact_hash=HASH_A, signer=sb,
-        )
-        # A and B carry the SAME hash → collapse → held at PRELIMINARY.
-        assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
-        c = open_graph.assert_claim(
-            "agent C", supports=[upstream],
-            generated_by="agent-C", signer=sc,
-        )
-        # C has no hash (no collapse) and a distinct signer → it converges with
-        # both prior peers, lifting the whole set to REPLICATED.
-        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(c)["support_level"] == "REPLICATED"
-
-    def test_same_agent_label_does_not_block_replicated(
-        self, open_graph, tmp_path,
-    ) -> None:
-        """``generated_by`` is a display label and plays no part in the gate: a
-        pair carrying the same label still promotes on distinct signers and
-        non-colliding hashes. The independence axis is the asserter_keyid, so
-        the label must neither grant nor withhold a promotion."""
-        sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream finding", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "first finding", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        b = open_graph.assert_claim(
-            "second finding from same agent", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_B, signer=sb,
-        )
-        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
-
-    def test_mark_claim_resolved_reapplies_hash_gate(
-        self, open_graph, tmp_path,
-    ) -> None:
-        """When a DOI resolves late, the deferred REPLICATED re-check must
-        consult the row's persisted artifact_hash — not bypass the gate. The
-        peers carry distinct signers, so only the shared hash can hold them
-        back."""
-        sa, sb = _two_signers(tmp_path)
-        # Peer A converges on upstream with HASH_A (no DOIs → resolved).
-        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "peer A", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        # Insert peer B with an unresolved flag forced on, hash=HASH_A.
-        # We use the db layer directly so we can fix unresolved=True without
-        # actually plumbing a fake DOI through the resolver.
-        b = _db.add_claim(
-            open_graph._conn, open_graph._root, "peer B",
-            supports=[upstream], generated_by="agent-B",
-            artifact_hash=HASH_A, unresolved=True, signer=sb,
-        )
-        # Confirm B is held back by unresolved AND would also collapse on hash.
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
-        assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-        # Clear unresolved flag, should re-fire REPLICATED check.
-        _db.mark_claim_resolved(open_graph._conn, open_graph._root, b)
-        # Hashes are EQUAL → the pair collapses → still PRELIMINARY.
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
-        assert open_graph.get_claim(a)["support_level"] == "PRELIMINARY"
-
-    def test_mark_claim_resolved_promotes_when_hashes_do_not_collide(
-        self, open_graph, tmp_path,
-    ) -> None:
-        """Mirror of the above for the promoting case. Under the inverted gate a
-        late-resolved peer promotes only when it does NOT collide on hash: here
-        peer B carries a DISTINCT hash (HASH_B) and a distinct signer, so the
-        deferred re-check converges it with A rather than collapsing it.
-        Equal hashes would instead collapse (the test above)."""
-        sa, sb = _two_signers(tmp_path)
-        upstream = open_graph.assert_claim("upstream", generated_by="seed", seed=True)
-        a = open_graph.assert_claim(
-            "peer A", supports=[upstream],
-            generated_by="agent-A", artifact_hash=HASH_A, signer=sa,
-        )
-        b = _db.add_claim(
-            open_graph._conn, open_graph._root, "peer B",
-            supports=[upstream], generated_by="agent-B",
-            artifact_hash=HASH_B, unresolved=True, signer=sb,
-        )
-        assert open_graph.get_claim(b)["support_level"] == "PRELIMINARY"
-        _db.mark_claim_resolved(open_graph._conn, open_graph._root, b)
-        assert open_graph.get_claim(a)["support_level"] == "REPLICATED"
-        assert open_graph.get_claim(b)["support_level"] == "REPLICATED"
-
-
-# ---------------------------------------------------------------------------
-# assert_claim parameter handling
+# Collapse check, opt-in hash agreement
 # ---------------------------------------------------------------------------
 
 class TestAssertClaimHashParam:
@@ -481,10 +270,10 @@ class TestCLIArtifactHash:
 # Tightened from the silent-merge anti-pattern. Prior
 # behavior matched only on artifact_hash; this let two callers using the
 # same key with different text + generated_by collapse into one row,
-# destroying the second author's content and breaking the REPLICATED
+# destroying the second author's content and collapsing two lines into
 # story (different generated_by converging on shared upstream). For
 # cross-lab convergence, callers must assert two separate claims that
-# share a supports[] entry, the actual REPLICATED path.
+# share a supports[] entry, which is what convergence looks like.
 
 
 class TestIdempotencyStrictContract:

@@ -116,8 +116,8 @@ CREATE TABLE IF NOT EXISTS supports_cache.cache_meta (
 # the signed rows already say. Every edge it returns must still be cited
 # by the parent's authoritative claims.supports_json; a planted or
 # half-written cache row names an ancestry no signature covers. Applied
-# to both arms of both walks, the same re-check the convergence
-# candidate lookup runs before a promotion.
+# to both arms of both walks, so neither direction can return an edge the
+# parent's signed row does not carry.
 _EDGE_IS_ATTESTED = """
             AND EXISTS (
                 SELECT 1 FROM claims c, json_each(c.supports_json) e

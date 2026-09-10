@@ -103,11 +103,10 @@ def classify_claim_verdict(
             "reach a real verdict."
         )
     # Signature re-verification. Two complementary checks:
-    #  (a) the tier-gated read flag (ESTABLISHED validation envelope /
-    #      REPLICATED participant bundle), and
-    #  (b) an audit-grade, tier-INDEPENDENT re-check (signed-field binding +
-    #      asserter + role signatures) that catches a tampered PRELIMINARY
-    #      signed claim the flag would pass through.
+    #  (a) the read path's own flag, computed for a listing, and
+    #  (b) an audit-grade re-check (signed-field binding + asserter + role
+    #      signatures) that catches a tampered claim the flag would pass
+    #      through.
     if claim.get("signature_bundle") and not claim.get("verified"):
         problems.append("signature failed re-verification on read")
     sig_ok, sig_reason = verify_claim_signatures(conn, claim)

@@ -2,10 +2,10 @@
 
 Traffic light (claim-based)
 ---------------------------
-  green  : at least one standing REPLICATED or ESTABLISHED claim
-  yellow : claims exist but none is standing above PRELIMINARY, either
-           because none was ever promoted or because every promoted one
-           has since been retracted or invalidated
+  green  : at least one standing claim carries a signed validation
+  yellow : claims exist but none standing carries one, either because
+           nobody has signed off on anything or because every claim that
+           was signed off on has since been retracted or invalidated
   red    : no claims at all
   error  : graph.db could not be read (corruption, missing table, locked)
 
@@ -32,40 +32,19 @@ class HealthReport:
     # is not a count of claims that assert a contradiction, and it does
     # not partition with open / resolved.
     claims_contradicted: int = 0
-    support_level_breakdown: dict[str, int] = field(default_factory=dict)
-    # True when the project carries any support_level, which every project with
-    # claims does: the column is NOT NULL DEFAULT 'PRELIMINARY', so a project
-    # that never named a level still stores one. The support ladder
-    # (PRELIMINARY / REPLICATED / ESTABLISHED) is a retired axis, removed in
-    # v0.4.0; the computed status is the axis to read. Surfaced so an operator
-    # who never typed a level still learns the vocabulary is retired. Read off
-    # the census above, so no extra scan of the claims table.
-    support_level_retired: bool = False
-    # REPLICATED / ESTABLISHED claims still standing: open, and not marked
-    # invalid by a signed contradiction verdict. The breakdown above is the
-    # full census and counts a retracted claim like any other.
-    standing_promoted: int = 0
-    # REPLICATED / ESTABLISHED rows whose signed material does not back the
-    # level they claim on read: a lone claim flipped to a high level by direct
-    # SQL, or a promoted row whose envelope was tampered. The census above counts
-    # levels as recorded and cannot tell a forged promotion from a genuine one;
-    # this is the separate re-verification count, and the traffic light cannot
-    # read green while it is non-zero.
+    # Standing claims carrying a validation envelope: open, not invalidated
+    # by a signed contradiction verdict. It counted claims that had reached a
+    # rung; the signed attestation is what outlived the rung.
+    standing_validated: int = 0
+    # Rows carrying signed material that does not re-verify on read: an
+    # envelope stapled onto another row, a signed field rewritten underneath,
+    # a swapped signature. The traffic light cannot read green while it is
+    # non-zero.
     failed_verification: int = 0
-    # Claims a promotion check failed to run on and left flagged for retry
-    # (``convergence_retry_needed=1``). The failure is swallowed at write time so
-    # a promotion never crashes a write, but a swallowed failure leaves the claim
-    # stuck below the level its evidence earns until refresh_convergence() re-runs
-    # detection. The common cause is a project one writer has upgraded: a promotion
-    # under the older release trips the newer promotion guard and gets flagged, and
-    # only the newer release clears it. Surfaced here so that stuck state is visible
-    # on `mareforma status` rather than silent. Informational, not a defect, so it
-    # does not gate the traffic light.
-    convergence_retry_pending: int = 0
     # A stored project-policy row whose root signature no longer backs it. Every
-    # enforcement then reads the fail-closed strictest policy (witnessing and
-    # strict promotion both required, dated before every claim), so promotions
-    # and restores refuse with no visible cause. Surfaced here so an operator
+    # enforcement then reads the fail-closed strictest policy (every rule on,
+    # dated before every claim), so declarations and restores refuse with no
+    # visible cause. Surfaced here so an operator
     # meets the tampered policy on `mareforma status` rather than inferring it
     # from a refusal. A project that never declared a policy reports False.
     policy_unverified: bool = False
@@ -93,11 +72,12 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         # refutation_status applies for its ``contradicted`` state, so the
         # word keeps one meaning across both surfaces.
         rows = conn.execute(
-            "SELECT support_level, COUNT(*) AS n, "
+            "SELECT COUNT(*) AS n, "
             "SUM(status = 'open') AS n_open, "
             "SUM(t_invalid IS NOT NULL) AS n_contradicted, "
-            "SUM(status = 'open' AND t_invalid IS NULL) AS n_standing "
-            "FROM claims GROUP BY support_level"
+            "SUM(validation_signature IS NOT NULL "
+            "    AND status = 'open' AND t_invalid IS NULL) AS n_standing "
+            "FROM claims"
         ).fetchall()
     except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
         # Read failure: surface as ``error`` rather than folding into
@@ -114,51 +94,25 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
         return report
 
     for r in rows:
-        level = r["support_level"]
-        report.support_level_breakdown[level] = r["n"]
-        report.claims_open += r["n_open"]
-        report.claims_resolved += r["n"] - r["n_open"]
-        report.claims_contradicted += r["n_contradicted"]
-        # Same filter the promotion path applies: a retracted or
-        # verdict-invalidated claim is no longer evidence of anything.
-        if level in ("REPLICATED", "ESTABLISHED"):
-            report.standing_promoted += r["n_standing"]
+        report.claims_open += r["n_open"] or 0
+        report.claims_resolved += (r["n"] or 0) - (r["n_open"] or 0)
+        report.claims_contradicted += r["n_contradicted"] or 0
+        # A retracted or verdict-invalidated claim is no longer evidence of
+        # anything, so it does not count as standing.
+        report.standing_validated += r["n_standing"] or 0
 
-    # A non-empty census means the project stores support levels (it always
-    # does once it has a claim), so the retired-ladder disclosure applies. Read
-    # off the grouped census above, not a fresh scan.
-    report.support_level_retired = bool(report.support_level_breakdown)
-
-    # Re-verify the promoted rows (only those; see count_unverified_promoted) so a
-    # forged support level cannot read green. Kept separate from the grouped
-    # census: the census counts levels as recorded, this counts the ones the
-    # signed material does not back.
+    # Re-verify the rows carrying signed material, so a graph whose
+    # signatures no longer check out cannot read green. Kept apart from the
+    # grouped census: that counts rows, this counts the ones whose signed
+    # material does not back what the row says.
     try:
-        from mareforma.db import DatabaseError, count_unverified_promoted
+        from mareforma.db import DatabaseError, count_unverified_rows
 
-        report.failed_verification = count_unverified_promoted(conn)
+        report.failed_verification = count_unverified_rows(conn)
     except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
         report.traffic_light = "error"
         report.rationale = (
-            "Could not re-verify promoted claims in graph.db "
-            f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
-            "(or `mareforma.restore(project_root)`) or "
-            "investigate the .mareforma/ directory; this is not the "
-            "same as an empty graph."
-        )
-        return report
-
-    # Claims a swallowed promotion failure left flagged for retry. One grouped
-    # count over the partial index, not a row materialisation.
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM claims WHERE convergence_retry_needed = 1"
-        ).fetchone()
-        report.convergence_retry_pending = int(row[0]) if row is not None else 0
-    except (sqlite3.OperationalError, sqlite3.DatabaseError, DatabaseError) as exc:
-        report.traffic_light = "error"
-        report.rationale = (
-            "Could not read the convergence-retry queue in graph.db "
+            "Could not re-verify the signed claims in graph.db "
             f"({type(exc).__name__}: {exc}). Run `mareforma restore` "
             "(or `mareforma.restore(project_root)`) or "
             "investigate the .mareforma/ directory; this is not the "
@@ -168,7 +122,7 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
 
     # A stored policy whose envelope no longer binds reads maximally strict on
     # every enforcement; name it here so the stall is visible on status rather
-    # than met only as a refused promotion or restore. A graph without the
+    # than met only as a refused declaration or restore. A graph without the
     # project_policy table (an older schema) simply has no policy to stall, so a
     # read failure here is not substantive and leaves the flag False.
     try:
@@ -213,18 +167,17 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
     light, rationale = _claim_census_light(report)
 
     # A stored policy whose signature no longer backs it forces every rule to the
-    # strictest reading, so promotions and restores refuse without a visible
+    # strictest reading, so declarations and restores refuse without a visible
     # cause. That bars green. It is orthogonal to the claim census, so it is
     # layered on top rather than folded into the cascade: a green project turns
     # yellow, and a project already flagged for a different reason (a forged
-    # promotion, say) keeps that reason and gains this one, so neither is masked.
+    # validation, say) keeps that reason and gains this one, so neither is masked.
     if report.policy_unverified:
         policy = (
             "The project policy is present but its root signature does not "
             "verify: enforcement has fallen back to the strictest reading "
-            "(witnessing and strict promotion both required, dated before every "
-            "claim). Re-sign the policy with the project root or restore from a "
-            "clean backup."
+            "(every rule on, dated before every claim). Re-sign the policy "
+            "with the project root or restore from a clean backup."
         )
         if light == "green":
             return "yellow", policy
@@ -239,29 +192,26 @@ def _claim_census_light(report: HealthReport) -> tuple[str, str]:
     if total == 0:
         return "red", "No claims recorded. Call graph.assert_claim() to start."
 
-    established = report.support_level_breakdown.get("ESTABLISHED", 0)
-    replicated = report.support_level_breakdown.get("REPLICATED", 0)
-    if established + replicated == 0:
-        return "yellow", "All claims are PRELIMINARY, no independent replication yet."
-
-    if report.standing_promoted == 0:
+    if report.standing_validated == 0:
         return "yellow", (
-            "Every replicated or validated claim has been retracted or "
-            "invalidated by a signed contradiction verdict."
+            "No claim carries a validation a human signed, or every claim that "
+            "did has been retracted or invalidated by a signed contradiction "
+            "verdict. Trust is read off the derived axes; this light only says "
+            "whether anyone has signed off on anything."
         )
 
-    # A promoted row whose signed material does not back its level bars green: the
-    # stored count says the project has standing evidence, but at least one of
-    # those promotions does not re-verify, so it is not evidence of anything.
+    # A row whose signed material does not check out bars green: the count says
+    # the project has standing evidence, and at least one piece of it does not
+    # re-verify, so it is not evidence of anything.
     if report.failed_verification > 0:
         return "yellow", (
-            f"{report.failed_verification} promoted claim(s) do not re-verify on "
-            "read: the stored REPLICATED/ESTABLISHED level is not backed by signed "
-            "material (a forged level or a tampered envelope). Run "
+            f"{report.failed_verification} claim(s) do not re-verify on read: "
+            "an envelope stapled onto another row, a signed field rewritten "
+            "underneath, or a swapped signature. Run "
             "`mareforma verify <claim_id>` to see which, then retract or repair."
         )
 
-    return "green", "At least one independently replicated or validated claim."
+    return "green", "At least one standing claim carries a signed validation."
 
 
 # ---------------------------------------------------------------------------

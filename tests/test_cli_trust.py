@@ -337,7 +337,7 @@ class TestVerifyBundleMode:
 
     def _make_bundle(self) -> Path:
         with mareforma.open(".") as g:
-            g.assert_claim("seeded", generated_by="seed", seed=True)
+            g.assert_claim("seeded", generated_by="seed")
         from mareforma.export_bundle import write_bundle
         out = Path("mareforma-bundle.json")
         write_bundle(Path("."), out, signing.load_private_key(

@@ -3,8 +3,8 @@
 Mareforma is pre-1.0 software maintained by the Mareforma team. The threat model
 matters: mareforma builds the local epistemic record AI scientists rely on
 for cross-agent replication, so a defect that lets an attacker forge cross-agent
-convergence (promoting a claim past `PRELIMINARY` without the distinct-signer
-evidence the promotion rule requires), a signed envelope, or a validator
+convergence (making one line of evidence read as two independent ones), a
+signed envelope, or a validator
 enrollment is a trust-layer failure, not a cosmetic bug. Reports here get
 priority.
 
@@ -17,8 +17,8 @@ version, the fix is "upgrade."
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.3.x   | ✅ current         |
-| < 0.3   | ❌ upgrade required |
+| 0.4.x   | ✅ current         |
+| < 0.4   | ❌ upgrade required |
 
 ## Reporting a vulnerability
 
@@ -36,7 +36,7 @@ hours. Do not include exploit details in the public issue.
 
 - Affected version (`mareforma --version` or `pip show mareforma`)
 - Reproduction: minimum code or CLI commands that demonstrate the issue
-- Impact: what an attacker can do (forge a promotion past `PRELIMINARY`,
+- Impact: what an attacker can do (make one line of evidence read as two,
   mutate a signed claim without detection, bypass identity gates, etc.)
 - Suggested fix or mitigation, if you have one
 
@@ -124,13 +124,12 @@ trust boundaries:
 - Sigstore-Rekor inclusion is opt-in (`rekor_url=` parameter on
   `mareforma.open`). Without it, claims are signed but not
   transparency-logged.
-- A support level above `PRELIMINARY` is derived, not asserted: it is
-  served as verified only when the signed evidence behind it verifies,
-  and a direct write to the column is refused unless a promotion window
-  is open. The window is a per-connection marker that only this library
-  opens, so a process that can both load mareforma and write to your
-  `graph.db` holds promotion authority. Local write access to the graph
-  is the boundary, the same residual as the signing key above.
+- What a claim is worth is derived on read, never stored: a row is served
+  as verified only when the signed material on it verifies. Nothing on the
+  row can be edited to raise it, because there is no such field. A direct
+  writer can still remove signed material, and the read path reports that
+  rather than hiding it. Local write access to the graph is the boundary,
+  the same residual as the signing key above.
 - A local model's lineage is the served weights' digest, resolved from
   the producer's own inference server through a scope-detached probe
   that never follows a redirect off the loopback host and accepts only
@@ -138,8 +137,20 @@ trust boundaries:
   sentinel or a name hash yields none). It is content-addressed for an
   honest producer but self-attested against an operator who controls
   that server, the same residual as the signing key above.
+- **A backup's `[completeness]` table is a witness against accident, not
+  against intent.** It records what `claims.toml` holds, so a file that no
+  longer holds it says so, and restore refuses. Nothing signs that table, and
+  recomputing it is free, so an editor who removes rows and rewrites the table
+  to match leaves a file restore accepts. Three edits are known to survive it,
+  all of them requiring the table to be rewritten: deleting a verdict from the
+  tail of the chain, stripping the `verdict_chain_withheld` key, and dropping
+  the `[schema_census]` section. Every signature in the file is verified
+  whatever the table says, so a forged claim or a stapled envelope is refused
+  either way. Closing the rest needs a whole-file signature over
+  `claims.toml`, and there is none.
 
-Defects in any of these are P0 by definition. Report them.
+Defects in any of these are P0 by definition. Report them, except the
+`[completeness]` bound above, which is documented rather than open.
 
 ## Out of scope
 
