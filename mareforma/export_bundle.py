@@ -470,10 +470,10 @@ def _verify_validation_attestation(
             f"{str(val_keyid)[:12]}…"
         )
     # Self-validation refusal, kept in step with the live read and restore paths
-    # (:func:`mareforma.db.core._refuse_self_validation`). A validator promotion
-    # needs a witnessing validator whose keyid does NOT appear on the claim's own
-    # envelope: the validator that signs the promotion must not also be the
-    # asserter or a role signer of the claim it promotes. This release added the
+    # (:func:`mareforma.db.core._refuse_self_validation`). A validation needs a
+    # witnessing validator whose keyid does NOT appear on the claim's own
+    # envelope: the validator that signs it must not also be the asserter or a
+    # role signer of the claim it signs off on. This release added the
     # refusal to restore and not here, so the detached verifier accepted a
     # self-validated row the other two paths refuse; the three rules must
     # agree. SEED envelopes are exempt, exactly as restore exempts them: a
@@ -543,7 +543,7 @@ def verify_bundle(
         )
     except InvalidSignature as exc:
         raise BundleVerificationError(
-            "bundle:signature verification failed — bundle has been tampered"
+            "bundle:signature verification failed, the bundle has been tampered"
         ) from exc
 
     # Parse the verified Statement.
@@ -660,7 +660,7 @@ def verify_bundle(
         if asserter_digest != subjects.get(subject_name):
             raise BundleVerificationError(
                 f"claim:{claim_id} asserter signature does not cover the "
-                "presented content — text or evidence differs from what "
+                "presented content: text or evidence differs from what "
                 "was signed"
             )
         # A validation attestation is verified whenever the node carries one.
@@ -692,7 +692,7 @@ def verify_bundle(
         expected = hashlib.sha256(chain_input).hexdigest()
         if subjects[subject_name] != expected:
             raise BundleVerificationError(
-                f"statement:subject digest mismatch for {claim_id!r} — "
+                f"statement:subject digest mismatch for {claim_id!r}: "
                 "bundle contents have been tampered"
             )
     return statement

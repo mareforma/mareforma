@@ -29,10 +29,10 @@ Flow
     ├─ INSERT via db.add_claim()
 
   query()
-    └─ SELECT via db.query_claims() with text/support/classification filters
+    └─ SELECT via db.query_claims() with text/classification filters
 
   validate()
-    └─ UPDATE via db.validate_claim(): the human-witness promotion gate
+    └─ UPDATE via db.validate_claim(): the human-witness attestation
 """
 
 from __future__ import annotations
@@ -151,8 +151,8 @@ def _synchronized(method):
     and returns rows the writer's rollback then erases. The cost is that a
     reader waits for the writer ahead of it, including the Rekor round trip
     ``submit_finding`` holds inside its transaction. Waiting is the lesser
-    harm: handing a caller a claim_id, a support level, or a trust map for
-    state that never lands is the failure this project exists to catch.
+    harm: handing a caller a claim_id or a trust map for state that never lands
+    is the failure this project exists to catch.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
@@ -413,8 +413,8 @@ class EpistemicGraph:
             ``submit_finding``, as ``obs.verdict.to_signed_dict()``. Bound
             into the signed statement and the chain hash and stored in the
             queryable ``observed_grounding`` column. ``UNGROUNDED`` or
-            ``OPAQUE`` blocks promotion; absent is read as no verdict
-            recorded and blocks nothing.
+            ``OPAQUE`` gates nothing; absent is read as no verdict
+            recorded.
             The axis is written from what the observer computed, not from
             this argument: the record is looked up by its receipt digest and
             the OBSERVER'S copy is what gets signed, so an edited state on a
@@ -1711,8 +1711,8 @@ class EpistemicGraph:
         computed, and only such a verdict writes the observed axis. A
         :class:`~mareforma.observe.GroundingVerdict` a caller constructed is a
         declaration, whatever its type says: it is stored and reported as
-        ``DECLARED`` and neutralised out of ``GROUNDED``, so it cannot promote
-        and cannot read as an execution mareforma watched. The verdict is
+        ``DECLARED`` and neutralised out of ``GROUNDED``, so it cannot read as an
+        execution mareforma watched. The verdict is
         attested before it is bound to the finding's citation, so a declared one
         cannot borrow a real citation either.
 
@@ -2359,8 +2359,8 @@ class EpistemicGraph:
             return self._annotate_unbound(record)
 
         # DISJOINT. Only a GROUNDED verdict is unsafe to store as-is, an OPAQUE
-        # or UNGROUNDED verdict does not promote and does not claim the data
-        # arrived, so a mismatched cited set on it is not a false trust signal.
+        # or UNGROUNDED verdict does not claim the data arrived, so a mismatched
+        # cited set on it is not a false trust signal.
         if record.get("grounding") != ObservedGrounding.GROUNDED.value:
             return record
 
@@ -2501,12 +2501,12 @@ class EpistemicGraph:
         The validation event is itself signed (binding claim_id +
         validator_keyid + validated_at + evidence_seen). The signed
         envelope is stored on the row's ``validation_signature`` column
-        so the promotion is independently verifiable.
+        so the validation is independently verifiable.
 
         Parameters
         ----------
         claim_id:
-            UUID of the claim to promote.
+            UUID of the claim to record the validation on.
         validated_by:
             Optional human-readable label stored alongside the keyid.
             The validator's keyid is the real identity; this string is
@@ -2526,7 +2526,7 @@ class EpistemicGraph:
             but the field shifts "a human pressed a button" to "a human
             pressed a button AND named the evidence they consulted." A
             validator who consistently signs ``evidence_seen=[]`` leaves
-            an audit-visible trail of unreviewed promotions.
+            an audit-visible trail of unreviewed validations.
 
         Raises
         ------
@@ -2544,7 +2544,7 @@ class EpistemicGraph:
             any mareforma-level structural or cryptographic gate
             (malformed payload, non-enrolled signer, wrong payloadType,
             signature verification failure, or payload-field mismatch
-            against the row being promoted). Should not fire on the
+            against the row being validated). Should not fire on the
             standard wrapper path (the wrapper builds the envelope
             from the same kwargs it threads through), but is listed
             for completeness because the underlying

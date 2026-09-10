@@ -765,7 +765,7 @@ def sign_validation(
     by the signature like the rest, so an empty list is the way to say
     "reviewed nothing"; leaving the key out signs it as null, which
     ``validate_claim`` and restore then refuse. The envelope is persisted
-    to the claim's ``validation_signature`` column so the promotion event
+    to the claim's ``validation_signature`` column so the validation event
     is independently verifiable.
     """
     payload = _canonical_record(_VALIDATION_FIELDS, validation)

@@ -114,8 +114,8 @@ class JSONLDExporter:
         Raises ``FileNotFoundError`` if *root* holds no graph: ``open_db``
         would otherwise create one and return an empty export as success.
         Raises ``UnverifiedClaimError`` if any claim failed verify-on-read: an
-        export carries the support level off the machine, so it must not
-        publish a level the signature no longer backs.
+        export carries the claim off the machine, so it must not publish
+        content the signature no longer backs.
         """
         from mareforma.db import open_db, list_claims, refuse_unverified_claims
 

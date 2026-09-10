@@ -52,7 +52,7 @@ First-time setup: run `mareforma bootstrap` once to generate an Ed25519 keypair 
 
 ## `mareforma.schema()`
 
-Return the epistemic schema: valid values, defaults, and state transitions.
+Return the epistemic schema: the valid values a claim can hold, and their defaults.
 
 ```python
 s = mareforma.schema()
@@ -60,14 +60,16 @@ s["schema_version"]    # 2
 s["classifications"]   # ['INFERRED', 'ANALYTICAL', 'DERIVED']
 s["statuses"]          # ['open', 'contested', 'retracted']
 s["defaults"]          # {'classification': 'INFERRED', 'status': 'open', ...}
-s["transitions"]       # list of state transition dicts
 ```
+
+There are no `support_levels` or `transitions` keys. They described the support
+ladder, and the ladder is gone.
 
 **Returns** `dict`: stable across patch releases within a major version.
 
 ---
 
-## `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None, enforce_rekor_policy=False)`
+## `mareforma.restore(project_root, *, claims_toml=None, rekor_log_pubkey_pem=None, enforce_rekor_policy=False, trust_unaccounted_backup=False)`
 
 Rebuild a fresh `graph.db` from `claims.toml` for catastrophic-loss
 recovery. Fresh-only: refuses to run if `graph.db` already has any
@@ -88,6 +90,7 @@ result = mareforma.restore("/path/to/project")
 | `claims_toml` | `str \| Path \| None` | `None` | Path to source TOML. Defaults to `<project_root>/claims.toml`. |
 | `rekor_log_pubkey_pem` | `bytes \| None` | `None` | PEM-encoded Rekor log operator public key. When supplied, every `[rekor_inclusions]` entry's Merkle inclusion proof is cryptographically verified before replay, and each proof is bound to the claim it covers. Verification failure raises `RestoreError(kind='rekor_inclusion_invalid')`. When `None`, sidecar entries are replayed unverified. |
 | `enforce_rekor_policy` | `bool` | `False` | Assert this project requires transparency-log witnessing. Requires a valid root-signed `[project_policy]` and a pinned `rekor_log_pubkey_pem`; a signed claim is then marked convergence-eligible only when it carries a verified, claim-bound inclusion proof. Closes the strip-route where an edited claims.toml makes an unwitnessed claim look ready. Off by default (best-effort, matching the pinned-key opt-in posture). |
+| `trust_unaccounted_backup` | `bool` | `False` | Restore a backup whose own completeness table does not match what the file holds, which is the path for an operator who edited it deliberately. It also covers a broken or short verdict chain and a `GROUNDED` observed axis arriving with nothing attesting it, rebuilding from the part that holds. It does NOT cover a backup written by a later format: this release cannot say what that file owes, so `format_ahead` is refused either way. |
 
 **Returns** `dict` with `validators_restored`, `claims_restored`,
 `unsigned_in_signed_mode`, and `verdict_chain_withheld`.
@@ -165,7 +168,7 @@ claim_id = graph.assert_claim(
 | `predicate_payload` | `dict \| None` | `None` | Structured predicate body for typed adapters. Stored in the queryable `predicate_payload` column only, NOT bound into the signed envelope or chain hash. |
 | `original_signature_bundle` | `str \| None` | `None` | Source-side DSSE envelope preserved by federation-import flows. Validated only for JSON well-formedness at write time, never re-verified. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor scoring the claim text against its cited supports. Its result is a declaration: `grounding_score` and `grounding_rationale` bound into the signed evidence vector (`ev_*` / `evidence_json`), the same posture as the rest of that vector. It never writes the observed axis. The two never share a value space, so a reader cannot confuse a self-declaration with a computed result. |
-| `observed_grounding` | `dict \| None` | `None` | Observed-grounding record computed by `observe()` or by `submit_finding`. Bound into the signed statement and the chain hash, stored in the queryable `observed_grounding` column, re-checked on restore. `UNGROUNDED` or `OPAQUE` blocks promotion; absent is read as no verdict recorded and blocks nothing. Sets the grounding axis of `trust_map()`. |
+| `observed_grounding` | `dict \| None` | `None` | Observed-grounding record computed by `observe()` or by `submit_finding`. Bound into the signed statement and the chain hash, stored in the queryable `observed_grounding` column, re-checked on restore. `UNGROUNDED` or `OPAQUE` gates nothing; absent is read as no verdict recorded. Sets the grounding axis of `trust_map()`. |
 | `finding_record` | `dict \| None` | `None` | The signed record of a finding's verdict inputs (`content_id`, `frame_id`, `plan_id`, `data_ids`, `bearing`, and a digest over its estimate line set), passed by `submit_finding`. Bound into the signed statement and the chain hash only when present, so a plain claim signs to byte-identical bytes. A verdict re-derives against this copy on read; absent means the claim is not a finding, or predates the record. |
 
 **Returns** `str`: `claim_id` UUID
@@ -391,7 +394,7 @@ was this invalidated" requires audit mode.
 
 Returns `{validator_keyid: count}` for every enrolled validator. Count
 is the number of claims whose validation envelope was
-signed by that keyid. Validators with zero promotions appear with
+signed by that keyid. Validators that have signed none appear with
 `count=0`. Derived state, recomputed on every call.
 
 ```python
@@ -574,7 +577,7 @@ graph.validate(
 )
 ```
 
-The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.open(key_path=...)`) AND that key must be enrolled in the project's `validators` table. The first key opened against a fresh graph auto-enrolls as the root validator. The validation event itself is signed: a DSSE-style envelope binding `(claim_id, validator_keyid, validated_at, evidence_seen)` is persisted to the row's `validation_signature` column, so the promotion is independently verifiable.
+The graph must have a loaded signer (from `mareforma bootstrap` or `mareforma.open(key_path=...)`) AND that key must be enrolled in the project's `validators` table. The first key opened against a fresh graph auto-enrolls as the root validator. The validation event itself is signed: a DSSE-style envelope binding `(claim_id, validator_keyid, validated_at, evidence_seen)` is persisted to the row's `validation_signature` column, so the validation is independently verifiable.
 
 `validated_by` is a cosmetic display label. The authenticated identity is the keyid embedded in the signed envelope.
 
@@ -596,7 +599,7 @@ When `validation_signature` is supplied directly to `db.validate_claim` (advance
 - `EvidenceCitationError`: if any `evidence_seen` entry is not a strict-v4 UUID, does not point to an existing claim, post-dates `validated_at`, or disagrees with the validation envelope's signed `evidence_seen` field
 - `LLMValidatorPromotionError`: if the loaded signer is enrolled with `validator_type='llm'`. LLM-typed validators sign validation envelopes, and recording one is refused; a human-typed validator has to make the call
 - `SelfValidationError`: if the loaded signer's keyid is the one on the claim's `signature_bundle`. Promotion needs an external witness, so on a single-key project this is the expected outcome
-- `InvalidValidationEnvelopeError`: if the signed envelope fails a structural or cryptographic gate (malformed payload, wrong `payloadType`, signer not enrolled, signature does not verify, or a payload field disagreeing with the row being promoted)
+- `InvalidValidationEnvelopeError`: if the signed envelope fails a structural or cryptographic gate (malformed payload, wrong `payloadType`, signer not enrolled, signature does not verify, or a payload field disagreeing with the row being validated)
 
 The last three subclass `MareformaError` directly, not `ValueError`, so a handler that catches `ValueError` alone lets all three through.
 
@@ -874,12 +877,12 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `CycleDetectedError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` would form a cycle |
 | `GraphTooLargeError` | `mareforma.db` | `assert_claim()`, `update_claim()` | `supports[]` reaches more distinct upstream claims than the acyclicity walk will visit, so the walk stopped without deciding |
 | `RestoreError` | `mareforma.db` | `restore()` | The rebuild from `claims.toml` refused or failed. Carries a `.kind` token naming which check refused |
-| `LLMValidatorPromotionError` | `mareforma.db` | `validate()` | The loaded signer is enrolled `validator_type='llm'`; a human-typed validator must promote |
-| `SelfValidationError` | `mareforma.db` | `validate()` | The loaded signer also signed the claim. Promotion needs an external witness |
+| `LLMValidatorPromotionError` | `mareforma.db` | `validate()` | The loaded signer is enrolled `validator_type='llm'`; a human-typed validator must sign the validation |
+| `SelfValidationError` | `mareforma.db` | `validate()` | The loaded signer also signed the claim. A validation needs an external witness |
 | `VerdictIssuerError` | `mareforma.db` | `record_replication_verdict()`, `record_contradiction_verdict()` | No signer loaded, signer not enrolled (chain walk fails), invalid method enum, referenced claim missing, or self-contradiction (`member == other`) |
 | `ProjectPolicyError` | `mareforma.db` | `require_rekor_witnessing()` | The project-policy declaration was refused: no signer loaded, the signer is not the project's single root validator, or a concurrent writer declared a rule the envelope in hand does not carry. Subclasses `ValueError` |
 | `EvidenceCitationError` | `mareforma.db` | `validate()` with `evidence_seen=...` | A cited entry isn't a strict-v4 UUID, points to a non-existent claim, post-dates `validated_at`, or disagrees with the envelope's `evidence_seen` field |
-| `InvalidValidationEnvelopeError` | `mareforma.db` | `validate()`, `db.validate_claim()` | Validation envelope is structurally / cryptographically invalid: malformed JSON, wrong `payloadType`, signer not enrolled, signature does not verify against the claimed signer, or payload binds a different `claim_id` / `validator_keyid` / timestamp than the row being promoted |
+| `InvalidValidationEnvelopeError` | `mareforma.db` | `validate()`, `db.validate_claim()` | Validation envelope is structurally / cryptographically invalid: malformed JSON, wrong `payloadType`, signer not enrolled, signature does not verify against the claimed signer, or payload binds a different `claim_id` / `validator_keyid` / timestamp than the row being validated |
 | `UnverifiedClaimError` | `mareforma.db` | `JSONLDExporter.export()`, `build_prov_o()`, `build_crate()` | The export would publish a claim carrying signed material that no longer re-verifies. Names the claim ids; run `mareforma verify <claim_id>` for the detail |
 | `TrustError` | `mareforma.trust` | nothing directly | Base class of every trust-layer exception. It subclasses `MareformaError`, so the broad catch covers the finding path too |
 | `NonFalsifiablePropositionError` | `mareforma.trust` | `register_proposition()`, `register_plan()`, `assert_finding()`, `submit_finding()` | The proposition forbids no observation (`direction` is `UNSPECIFIED` or `scope` is empty), so it cannot anchor a finding |
@@ -902,7 +905,7 @@ catching looks like `from mareforma import RekorInclusionError`.
 | `MalformedRunError` | `mareforma.reexec` | `reexec()` | The run is neither a record dict nor a readable JSON record, or the record is missing a usable `reported_value`, `tolerance` or non-reexecutable reason |
 | `ScopeNotClosedError` | `mareforma.observe` | `ObserveHandle.verdict` | The verdict was read inside the open `observe()` block, before the observer had seen the whole span. Subclasses `RuntimeError` |
 | `NoPerturbationsError` | `mareforma.observe` | `perturbation_oracle()` | `perturb` was an empty sequence, so there is no null to run. A caller handing the oracle nothing to measure is a bug in the call, never a `NOT_TESTED` row a report would count. Subclasses `ValueError` |
-| `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed a check: DSSE signature, per-claim subject digest, per-claim asserter signature, validator chain, or displayed support level |
+| `BundleVerificationError` | `mareforma.export_bundle` | `mareforma verify` | Signed export bundle failed a check: DSSE signature, per-claim subject digest, per-claim asserter signature, validator chain, or a validation envelope a node carries |
 
 The submodule paths in the table tell you where the source lives. They
 also tell you what a broad catch covers: the `mareforma.db` and
@@ -914,7 +917,7 @@ Catch those by name, or by the base their module gives them:
 `SigningError`, `mareforma.validators.ValidatorError`,
 `BundleVerificationError`.
 
-Schema-mismatch message (raised when `open_db()` finds a graph.db whose `user_version` differs from mareforma's `_SCHEMA_VERSION`): `"graph.db has user_version=N but this mareforma expects user_version=M. The dev branch does not migrate schemas. Delete .mareforma/graph.db to start fresh; claims.toml is a human-readable record of the prior state."`
+Schema-ahead message (raised when `open_db()` finds a graph.db whose `user_version` is **higher** than mareforma's `_SCHEMA_VERSION`): `"graph.db has user_version=N, which is ahead of the user_version=M this mareforma understands. It was written by a newer release and may carry schema this one does not know how to read, so opening it could report on a graph it is misreading. Nothing is wrong with the file. Upgrade mareforma to the version that wrote it. Do not delete graph.db: it holds the chain and every signature, and claims.toml cannot reconstruct them."` A graph at a **lower** `user_version` is not an error: it is migrated on the open that meets it.
 
 ---
 
@@ -1605,7 +1608,8 @@ record yields an empty arm rather than a fabricated one.
 Both gain an optional `grounding` parameter that takes a `GroundingVerdict`. The
 verdict is bound into the signed statement, the chain hash, and a queryable
 column, and re-checked on restore. The return dict gains a `grounding` key (the
-stored record, or `None`). A finding whose verdict is not `GROUNDED` never counts
-toward a support-level promotion; a claim asserted without a verdict is
+stored record, or `None`). A finding whose verdict is not `GROUNDED` reads
+`UNGROUNDED` or `OPAQUE` on the trust map's grounding axis and gates nothing
+else; a claim asserted without a verdict is
 unaffected and its signed bytes are identical to a pre-observer claim. Asserting a
 claim while an `observe()` scope is still open raises.

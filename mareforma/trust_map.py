@@ -12,7 +12,7 @@ claim's trust as a structured, honest ledger instead of a single word.
 Design invariants:
 
 - **Read-side only.** The map is derived from what is already stored and signed.
-  It adds no new signed field; nothing here changes a verdict or a support level.
+  It adds no new signed field; nothing here changes a verdict or a stored row.
 - **Honest, never inferred.** An unobservable property is stated as such
   (``DEFERRED`` / ``not present`` / ``UNVERIFIABLE``), never guessed. A property
   the observer could not see is not a confident answer.

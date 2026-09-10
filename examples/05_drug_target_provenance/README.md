@@ -11,8 +11,8 @@ code followed by the console output it prints.
 > **This example is not re-run on every change.** It needs the MEDEA package, a
 > GPU-class machine, ~21 GB of MedeaDB, and an LLM API key. The output blocks
 > below are from the recorded **Case B** run, where MEDEA's data pipeline
-> returned `null`. The classification → support-level → warning are exactly what
-> the code prints for that case; the hypothesis text and claim ids are run-specific
+> returned `null`. The classification and the warning are exactly what the
+> code prints for that case; the hypothesis text and claim ids are run-specific
 > and shown elided.
 
 ## The epistemic question
@@ -91,7 +91,7 @@ ra_claim_id = graph.assert_claim(
 ```
 
 ```
-  [1/2] Running MEDEA — Rheumatoid Arthritis / CD4+ T cells ...
+  [1/2] Running MEDEA, Rheumatoid Arthritis / CD4+ T cells ...
     Classification: INFERRED
     Finding: <MEDEA's final hypothesis>
     Recorded claim: <claim-id>
@@ -108,7 +108,7 @@ print(f"  RA fork:   {ra_classification:10}  →  {ra_claim['claim_id'][:8]}")
 print(f"  SLE fork:  {sle_classification:10}  →  {sle_claim['claim_id'][:8]}")
 
 if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
-    # The data pipeline did not run — both findings are LLM prior knowledge.
+    # The data pipeline did not run, both findings are LLM prior knowledge.
     ...
 ```
 
@@ -120,7 +120,7 @@ if ra_result["generated_code"] is None or sle_result["generated_code"] is None:
     SLE fork:  INFERRED    →  a07be115
 
     ⚠  One or both forks returned null generated_code.
-       Both findings are INFERRED — the data pipeline did not run.
+       Both findings are INFERRED, the data pipeline did not run.
        This was Case B in the original run. See the README for context.
 ```
 

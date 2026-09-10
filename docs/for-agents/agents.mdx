@@ -171,7 +171,7 @@ Assert a claim. Returns `claim_id` (UUID).
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
 | `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes (figure, CSV, model). Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data never blocks. |
 | `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
-| `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
+| `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` gates nothing, it sets the grounding axis of `trust_map()`. |
 | `finding_record` | `dict \| None` | `None` | Set by `submit_finding`, not by hand: the signed record of a finding's verdict inputs (proposition, plan, datasets, bearing, and a digest over its estimate line set). Bound into the signed statement only when present, so a plain claim signs identically; a verdict re-derives against it on read. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
 | `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim. Use it on a host holding several keys, one per asserter. |
@@ -201,7 +201,7 @@ worth is computed on read by the trust map rather than written onto either row.
 
 Full per-method documentation lives in the
 [API reference](/reference/api). `mareforma.schema()` is available at
-runtime for valid values and state transitions.
+runtime for the valid values a claim can hold.
 
 ---
 
@@ -520,8 +520,8 @@ namespacing means schema evolution to v2 carries a new predicate type
 without breaking v1 verifiers. Content added to the predicate or mutated
 in it fails verification even when the bundle is re-signed with the same
 key: each claim's subject digest and its own asserter signature are
-checked against the presented content, and the displayed support level
-against signed material. Content removed does not: a verified bundle
+checked against the presented content, and every validation envelope a
+node carries against the bundle's validator set. Content removed does not: a verified bundle
 attests the claims it carries, not that they are all the claims in the
 graph, so a claim dropped together with its subject entry verifies
 clean. Editorial status is exporter-attested, not verified.

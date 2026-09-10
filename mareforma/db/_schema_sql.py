@@ -110,8 +110,8 @@ CREATE TABLE IF NOT EXISTS claims (
     -- receipt_digest}. Distinct from the declared
     -- ``classification`` column above and never overlapping its value space.
     -- Written from the same record bound into the signed predicate, so this is
-    -- a queryable denormalisation the split measurement and the promotion gate
-    -- read; the signed envelope stays authoritative. NULL on every claim
+    -- a queryable denormalisation the split measurement reads; the signed
+    -- envelope stays authoritative. NULL on every claim
     -- asserted without the observer (including every row that predates this
     -- column), and a NULL here means the signed predicate omits the field too,
     -- so the signed bytes are byte-identical to a pre-observer claim.
@@ -728,9 +728,9 @@ END"""
 # unrunnable. A ``BEFORE UPDATE OF`` list is an event filter, not a reference,
 # and the column stays droppable.
 #
-# So the WHEN clause keys on the same per-connection marker
-# ``claims_signed_promotion_backed`` uses: ``set_project_policy`` opens the
-# window around its upsert, and no other connection has that temp table to find.
+# So the WHEN clause keys on a per-connection marker: ``set_project_policy``
+# opens the window around its upsert, and no other connection has that temp
+# table to find.
 # The marker is a speed bump, not the guarantee (a writer with SQL access can
 # create the same temp table, drop the trigger, or reach the row through
 # INSERT OR REPLACE, which SQLite runs without firing either guard while

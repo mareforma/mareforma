@@ -205,11 +205,11 @@ def invalidate_conn_cache(conn: sqlite3.Connection) -> None:
     cache persists across calls. This invalidation is defense-in-depth, not
     the primary guard: the ``validators`` table is INSERT-only (no code path
     UPDATEs or DELETEs a chain), and the one INSERT that could invalidate a
-    cached True — planting a second self-signed root — is caught on every
+    cached True, planting a second self-signed root, is caught on every
     call by the singleton-root re-check that runs BEFORE the cache lookup,
     regardless of the cache. So a stale True cannot actually survive; the
     invalidation just keeps the cache tidy. A raw stdlib
-    ``sqlite3.Connection`` (rare — only a caller who bypassed ``open_db``)
+    ``sqlite3.Connection`` (rare: only a caller who bypassed ``open_db``)
     rejects the attribute, so :func:`_conn_cache` falls through to its
     "fresh set every call" branch and this function is a harmless no-op there.
 
@@ -272,7 +272,7 @@ def single_trust_domain(conn: sqlite3.Connection) -> bool:
     """True iff every enrolled validator traces to one root of trust.
 
     The solo-operator default: one self-signed root, every other validator
-    chained beneath it. This is NOT ``count_validators == 1`` — a root with
+    chained beneath it. This is NOT ``count_validators == 1``: a root with
     several delegated validators is still a single trust domain. It labels the
     *validator* topology only (one root key), so it discloses trust-domain
     concentration; it is not a Sybil guard over the participant topology where
@@ -408,7 +408,7 @@ def list_validators_verified(conn: sqlite3.Connection) -> list[dict]:
 
     :func:`list_validators` is the raw mirror the backup and the export bundle
     need, and it answers "what is in the table". This answers the operator's
-    question, "who may promote claims here", so it runs the same chain walk
+    question, "who may sign off on claims here", so it runs the same chain walk
     every enforcement path runs: a row planted by direct sqlite INSERT, or any
     row at all once a second self-signed root exists, is reported unverified
     rather than shown as a healthy enrollment.
@@ -455,7 +455,7 @@ def _refuse_if_present(conn: sqlite3.Connection, keyid: str) -> None:
         raise ValidatorAlreadyEnrolledError(
             f"Key {keyid[:12]}… already has a row in the validators "
             "table, but its chain does not verify back to a self-signed "
-            "root. The table appears tampered — investigate before "
+            "root. The table appears tampered, investigate before "
             "enrolling further keys."
         )
 
@@ -640,7 +640,7 @@ def enroll_validator(
     or ``'llm'``, bound into the signed enrollment envelope. There is
     no external verification; the value reflects what the parent signed
     off on at enroll time. ``'llm'`` validators are subject to the
-    promotion ceiling enforced by :func:`mareforma.db.validate_claim`
+    ceiling enforced by :func:`mareforma.db.validate_claim`
     (an LLM validator cannot sign off on a claim).
 
     Raises

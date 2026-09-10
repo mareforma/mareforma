@@ -461,8 +461,9 @@ def validator_list(as_json: bool) -> None:
 def status_cmd(as_json: bool) -> None:
     """Show epistemic health dashboard.
 
-    Traffic light: GREEN (≥1 replicated/established), YELLOW (all preliminary),
-    RED (no claims).
+    Traffic light: GREEN (a standing claim carries a signed validation and
+    everything signed re-verifies), YELLOW (none does, or something signed
+    fails to re-verify), RED (no claims).
 
     \b
     Examples:

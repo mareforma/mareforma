@@ -448,7 +448,8 @@ def restore(
     Returns
     -------
     dict
-        ``{"validators_restored": N, "claims_restored": M}``.
+        ``{"validators_restored": N, "claims_restored": M,
+        "unsigned_in_signed_mode": U, "verdict_chain_withheld": W}``.
 
     Raises
     ------
@@ -713,8 +714,7 @@ def __dir__() -> list[str]:
     ``Path`` and ``TYPE_CHECKING`` are imported at module scope because
     ``open()`` uses them at runtime, but they should not surface in
     tab-completion or be confused for public mareforma surface. The retired
-    support labels are intentionally omitted: they resolve via
-    :func:`__getattr__` but stay out of tab-completion, matching their
-    deprecated status.
+    support labels are gone from the module entirely: :func:`__getattr__`
+    resolves nothing, so there is no name here to omit.
     """
     return sorted(__all__)

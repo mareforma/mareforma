@@ -118,11 +118,6 @@ rep_2 = graph.assert_claim(
 ```
   query_graph('Target T') → 3 claims from Lab A
 
-  Claim:      Prior literature on Target T in condition C…
-  Source:     None  ← Lab B cannot access this
-  Supports:   []
-  Class:      DERIVED
-
   Claim:      Target T activity in condition C is specific to cell subtype…
   Source:     private_dataset_A  ← Lab B cannot access this
   Supports:   ['f752301b…']
@@ -132,6 +127,11 @@ rep_2 = graph.assert_claim(
   Source:     private_dataset_A  ← Lab B cannot access this
   Supports:   ['e7b323e1…']
   Class:      ANALYTICAL
+
+  Claim:      Prior literature on Target T in condition C…
+  Source:     None  ← Lab B cannot access this
+  Supports:   []
+  Class:      DERIVED
 
   Lab B published 2 claims.
   rep_1 id: 088283cf…

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-05_drug_target_provenance.py — set up and run the MEDEA drug target demo.
+05_drug_target_provenance.py, set up and run the MEDEA drug target demo.
 
 Usage
 -----
@@ -91,7 +91,7 @@ def uv_pip(uv: Path, *args):
 
 def stage_install(uv: Path):
     print("=" * 60)
-    print("STAGE 1 — Install")
+    print("STAGE 1: Install")
     print("=" * 60)
 
     if not MEDEA_SRC.exists():
@@ -149,7 +149,7 @@ def stage_install(uv: Path):
 
 def stage_data():
     print("=" * 60)
-    print("STAGE 2 — Download MedeaDB (~21 GB)")
+    print("STAGE 2: Download MedeaDB (~21 GB)")
     print("=" * 60)
 
     if not VENV_HF.exists():
@@ -171,7 +171,7 @@ def stage_data():
 
 def stage_run():
     print("=" * 60)
-    print("STAGE 3 — Run the experiment")
+    print("STAGE 3: Run the experiment")
     print("=" * 60)
 
     if not VENV_PY.exists():

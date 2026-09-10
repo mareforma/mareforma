@@ -4,28 +4,27 @@ The observer computes a GROUNDED verdict against the source(s) the producer name
 in ``observe(cites=...)``. Nothing in that computation checks that those cited
 sources are the same data the FINDING claims to rest on. Without this gate a
 producer can read ``/etc/hostname`` inside the scope, earn a signed GROUNDED, and
-bind it onto a finding citing a trial dataset it never touched — the verdict is
+bind it onto a finding citing a trial dataset it never touched. The verdict is
 honest about the read it saw, dishonest about the claim it is attached to.
 
 This module is that gate. It compares the sources the verdict actually observed a
 matching read for (its ``grounded_sources``, not the full declared cite set)
 against the finding's own citation identifiers and reports one of three states:
 
-- ``MATCHED``        — the verdict cites at least one source the finding cites.
-                       The GROUNDED attestation is about the finding's own data.
-- ``DISJOINT``       — the finding cites data, and the verdict names none of it
-                       (or names nothing at all). A GROUNDED here is unbound; it
-                       is downgraded to OPAQUE at bind time, or raised in strict
-                       mode.
-- ``NOT_APPLICABLE`` — the finding carries no citation to bind against, so there
-                       is nothing to demonstrate. The verdict is kept as-is.
+- ``MATCHED``: the verdict cites at least one source the finding cites. The
+  GROUNDED attestation is about the finding's own data.
+- ``DISJOINT``: the finding cites data, and the verdict names none of it (or
+  names nothing at all). A GROUNDED here is unbound; it is downgraded to OPAQUE
+  at bind time, or raised in strict mode.
+- ``NOT_APPLICABLE``: the finding carries no citation to bind against, so there
+  is nothing to demonstrate. The verdict is kept as-is.
 
 The comparison is PURE STRING equality over already-normalized identifiers. Both
 sides are normalized exactly once, at write time (the verdict's cited set when the
 scope was entered; the finding's sources when the claim is signed), and the
 normalized strings are persisted inside the signed record. Read-side re-checks
 (verify-on-read, ``restore``, the audit CLI) compare the STORED strings with no
-filesystem access — realpath on a verifier's host would false-flag an honest
+filesystem access, because realpath on a verifier's host would false-flag an honest
 cross-host claim whose paths do not exist there.
 """
 from __future__ import annotations
@@ -66,7 +65,7 @@ class GroundingCitationMismatchError(Exception):
     """Raised in strict mode when a verdict's cited set is disjoint from the
     finding's citation. The default (non-strict) path downgrades to OPAQUE
     instead of raising, so a cooperating-but-misconfigured producer is not
-    broken mid-run — the health event names the fix.
+    broken mid-run: the health event names the fix.
     """
 
 
@@ -111,8 +110,8 @@ def check_grounding_binding(
 
     Both arguments are tuples of ALREADY-NORMALIZED identifiers (absolute paths,
     ``scheme://host/path`` URLs, or ``sha256:`` content addresses). This routine
-    does pure string comparison — it never normalizes, hashes, or touches the
-    filesystem — so it is safe to run on any host, including one where the cited
+    does pure string comparison. It never normalizes, hashes, or touches the
+    filesystem, so it is safe to run on any host, including one where the cited
     paths do not exist.
 
     - ``finding_sources`` empty → ``NOT_APPLICABLE``: the finding cites no data,

@@ -197,7 +197,7 @@ class OutputIngester:
 
     Claims are INFERRED by default: a Gemini output is a single
     source's claim, not a cross-host replication. Downstream code is
-    responsible for promoting findings that converge with claims from
+    responsible for reading findings that converge with claims from
     other sources.
     """
 

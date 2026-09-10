@@ -162,7 +162,7 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 | **Signed claims** | Each claim shows who stands behind it and cannot be altered unnoticed. |
 | **Grounding check** | Computes whether a finding's step actually accessed the data it cites, or leaned on the model's memory, by observing the run. |
 | **Trust map** | `mareforma map <claim>` shows every trust property (grounding, independence, contestation, witnessing) with how far it can be trusted, and says plainly what it cannot check. |
-| **Verify** | `mareforma verify <claim>` re-checks the signatures, that the grounding verdict matches the data the finding cites, and the support level, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
+| **Verify** | `mareforma verify <claim>` re-checks the signatures, that the signer is enrolled, and that the grounding verdict matches the data the finding cites, with stable exit codes for CI (0 verified, 1 tampered, 2 unverifiable). |
 | **Diagnose a run** | `mareforma diagnose -- python run.py` runs a target under the observer and reports what data actually flowed, and where a silent fallback hid. |
 | **Audit a pipeline** | `mareforma audit --findings map.json -- python run.py` runs a pipeline that never imports mareforma and signs one grounding receipt per finding, from the observer alone. |
 | **Serve a project to an agent** | `mareforma mcp serve` serves one project over the Model Context Protocol, read and verify only. Six tools to query, inspect and verify; no write path. |
@@ -173,7 +173,7 @@ mareforma bootstrap   # optional: sign your claims and enable the public log
 
 Trust comes from a claim's place in the graph, never from a self-reported score. The lead signal is **effective independence**: how many checks behind a finding differ in model, data, and signer. Two agents on the same model are one line of evidence, not two, so the count holds until a check on a distinct model, or a human check, raises it. `mareforma map <claim>` reports the number and marks it `UNVERIFIABLE` when it cannot tell the models apart. When every signer traces back to one operator who could have made all the keys, it names that single trust root on the count: the number then rests on distinct model or human lines within one trust domain, not independence across operators.
 
-High-trust claims are re-checked against their signatures on every read, so a tampered claim in a shared graph is caught when you query, not served.
+Every claim carrying signed material is re-checked against its signatures on every read, so a tampered claim in a shared graph is caught when you query, not served.
 
 Classification stays a secondary label the agent declares: `INFERRED` (model reasoning), `ANALYTICAL` (analysis run against real data), `DERIVED` (built on higher-trust claims). It is a declaration, kept honest by the computed grounding verdict above, never the trust signal on its own.
 

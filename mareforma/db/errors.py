@@ -66,7 +66,7 @@ class IllegalStateTransitionError(MareformaError):
 
     The trigger raises ``mareforma:state:<suffix>`` strings via
     ``RAISE(ABORT, ...)``, where the suffix is a static literal such as
-    ``illegal_transition:from_preliminary``: ``RAISE()`` cannot
+    ``retracted_is_terminal``: ``RAISE()`` cannot
     concatenate a column value below SQLite 3.46. Python catches the
     resulting ``sqlite3.IntegrityError`` and re-raises this exception
     with the parsed suffix so callers can pattern-match on it instead
@@ -112,7 +112,7 @@ class EvidenceCitationError(MareformaError):
     """Raised when ``evidence_seen`` on a validation envelope is malformed.
 
     ``validate_claim`` accepts an ``evidence_seen`` list of claim_ids the
-    validator declares to have reviewed before signing the promotion.
+    validator declares to have reviewed before signing the validation.
     Mareforma cannot prove the validator actually opened those claims,
     but it CAN verify that every cited entry is a strict-v4 UUID pointing
     at an existing claim with ``created_at <= validated_at``. Any failure
@@ -149,7 +149,7 @@ class InvalidValidationEnvelopeError(MareformaError):
       * envelope fails Ed25519 verification against the claimed signer's
         public key (cryptographic forgery or wrong signer),
       * envelope's payload binds a different ``claim_id`` than the row
-        being promoted (replay across claims),
+        being validated (replay across claims),
       * envelope's payload binds a ``validator_keyid`` that does not
         equal the signing keyid (internal inconsistency),
       * envelope's payload's timestamp (``validated_at`` for validation

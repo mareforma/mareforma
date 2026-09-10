@@ -32,15 +32,9 @@ class HealthReport:
     # is not a count of claims that assert a contradiction, and it does
     # not partition with open / resolved.
     claims_contradicted: int = 0
-    # Rows carrying signed material that does not re-verify on read: an
-    # envelope stapled onto another row, a signed field rewritten underneath,
-    # a swapped signature. This counted promoted rows, because a stored level
-    # was the unsigned word a direct writer could raise; the level is gone and
-    # the tampering it stood for is not. The traffic light cannot read green
-    # while it is non-zero.
     # Standing claims carrying a validation envelope: open, not invalidated
-    # by a signed contradiction verdict. This counted promoted claims; the
-    # signed attestation is what outlived the level they were promoted to.
+    # by a signed contradiction verdict. It counted claims that had reached a
+    # rung; the signed attestation is what outlived the rung.
     standing_validated: int = 0
     # Rows carrying signed material that does not re-verify on read: an
     # envelope stapled onto another row, a signed field rewritten underneath,
@@ -48,9 +42,9 @@ class HealthReport:
     # non-zero.
     failed_verification: int = 0
     # A stored project-policy row whose root signature no longer backs it. Every
-    # enforcement then reads the fail-closed strictest policy (witnessing and
-    # strict promotion both required, dated before every claim), so promotions
-    # and restores refuse with no visible cause. Surfaced here so an operator
+    # enforcement then reads the fail-closed strictest policy (every rule on,
+    # dated before every claim), so declarations and restores refuse with no
+    # visible cause. Surfaced here so an operator
     # meets the tampered policy on `mareforma status` rather than inferring it
     # from a refusal. A project that never declared a policy reports False.
     policy_unverified: bool = False
@@ -128,7 +122,7 @@ def compute_health(conn: sqlite3.Connection) -> HealthReport:
 
     # A stored policy whose envelope no longer binds reads maximally strict on
     # every enforcement; name it here so the stall is visible on status rather
-    # than met only as a refused promotion or restore. A graph without the
+    # than met only as a refused declaration or restore. A graph without the
     # project_policy table (an older schema) simply has no policy to stall, so a
     # read failure here is not substantive and leaves the flag False.
     try:
@@ -173,18 +167,17 @@ def _compute_traffic_light(report: HealthReport) -> tuple[str, str]:
     light, rationale = _claim_census_light(report)
 
     # A stored policy whose signature no longer backs it forces every rule to the
-    # strictest reading, so promotions and restores refuse without a visible
+    # strictest reading, so declarations and restores refuse without a visible
     # cause. That bars green. It is orthogonal to the claim census, so it is
     # layered on top rather than folded into the cascade: a green project turns
     # yellow, and a project already flagged for a different reason (a forged
-    # promotion, say) keeps that reason and gains this one, so neither is masked.
+    # validation, say) keeps that reason and gains this one, so neither is masked.
     if report.policy_unverified:
         policy = (
             "The project policy is present but its root signature does not "
             "verify: enforcement has fallen back to the strictest reading "
-            "(witnessing and strict promotion both required, dated before every "
-            "claim). Re-sign the policy with the project root or restore from a "
-            "clean backup."
+            "(every rule on, dated before every claim). Re-sign the policy "
+            "with the project root or restore from a clean backup."
         )
         if light == "green":
             return "yellow", policy

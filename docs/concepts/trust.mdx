@@ -132,6 +132,19 @@ A property Mareforma cannot observe is stated (`DEFERRED`, `not present`, or
 `UNVERIFIABLE`), never inferred to a confident answer. The map is a read-side
 artifact: it adds no signed field and changes no verdict.
 
+The `standing` axis is where you read whether a human signed off. It reads off
+the signed validation envelope, not off any word stored beside it:
+
+| Value | Meaning |
+|---|---|
+| `VALIDATED` | An enrolled validator signed off, and the envelope verifies on read |
+| `VALIDATION_UNVERIFIED` | The row carries a validation envelope that did not verify on read |
+| `UNRATIFIED` | Nobody has signed off on this claim |
+
+`UNRATIFIED` is the resting state, and it is not a criticism of the claim. Most
+findings in a working project have never been through a human, and the
+independence number is what a reader weighs meanwhile.
+
 Every map carries the engine version that computed it, so a stored record names
 the build behind its tiers. That version is bound to the package version, and a
 build where the two disagree refuses to render a map at all, raising

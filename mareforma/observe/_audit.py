@@ -4,7 +4,7 @@ The wrapped loaders (:mod:`mareforma.observe._loaders`) see the reads they can
 proxy and whether they returned data. This audit hook covers what the loaders
 cannot: the spawn seams that hide reads from the observer, and the opens that
 happen through uninstrumented readers (``os.open``, C-extension I/O). It is the
-honesty gate — it is what lets ``UNGROUNDED`` mean genuine absence instead of
+honesty gate: it is what lets ``UNGROUNDED`` mean genuine absence instead of
 "absence I could not see."
 
 The hook is a permanent, process-global cost once installed: ``sys.addaudithook``
@@ -12,8 +12,8 @@ cannot be undone (PEP 578). It is installed lazily on the first ``observe()`` so
 a process that never observes never pays it, and it no-ops as cheaply as
 possible when no scope is active. This global surface is a documented opt-in.
 
-An audit hook that raises propagates the exception into the audited call site —
-that would break the host pipeline. So this hook NEVER raises: any internal
+An audit hook that raises propagates the exception into the audited call site,
+which would break the host pipeline. So this hook NEVER raises: any internal
 failure is swallowed and marks the active scope opaque (fail-safe), and nothing
 crosses back into host code.
 """

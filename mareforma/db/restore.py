@@ -937,7 +937,8 @@ def restore(
     Returns
     -------
     dict
-        ``{"validators_restored": N, "claims_restored": M}``.
+        ``{"validators_restored": N, "claims_restored": M,
+        "unsigned_in_signed_mode": U, "verdict_chain_withheld": W}``.
 
     Raises
     ------

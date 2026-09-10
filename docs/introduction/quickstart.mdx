@@ -187,7 +187,7 @@ graph.enroll_validator(
     identity="reviewer",
 )
 
-# validate() uses the graph's loaded key, so promote from the reviewer's graph.
+# validate() uses the graph's loaded key, so sign from the reviewer's graph.
 with mareforma.open(key_path="reviewer.key") as review_graph:
     review_graph.validate(id_a, validated_by="reviewer@example.org")
 
@@ -198,7 +198,7 @@ graph.get_claim(id_a)["validated_by"]  # → "reviewer@example.org"
 filter on. It is identity-gated:
 the loaded signing key must be enrolled in the project's `validators`
 table, and it must not appear on the claim envelope or on any peer in the
-converging set. A key that promotes its own line raises
+converging set. A key that signs off on its own line raises
 `SelfValidationError`. The validation event itself is signed and persisted
 to the claim's `validation_signature` column.
 

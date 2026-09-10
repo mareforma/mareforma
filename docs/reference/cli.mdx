@@ -225,8 +225,9 @@ mareforma claim list [OPTIONS]
 | `--json` | `False` | Emit JSON to stdout |
 
 A row whose signature no longer re-verifies still prints, marked `UNVERIFIED`
-beside its support level. The level is not backed until `mareforma verify`
-clears it. `claim show` carries the same marker.
+beside its classification, so an auditor sees it rather than losing it from the
+listing. Run `mareforma verify <claim_id>` for what failed. `claim show` carries
+the same marker.
 
 **Examples**
 
@@ -314,7 +315,7 @@ mareforma status [OPTIONS]
 |---|---|
 | 🔴 RED | No claims recorded |
 | 🟡 YELLOW | Claims exist but none standing carries a signed validation, or every claim that carried one has been retracted or invalidated by a signed contradiction verdict, or something carrying signed material does not re-verify on read |
-| 🟢 GREEN | At least one validated claim still standing, meaning not retracted and not invalidated by a signed contradiction verdict, and every promoted claim re-verifies |
+| 🟢 GREEN | At least one standing claim carries a signed validation, meaning it is not retracted and not invalidated by a signed contradiction verdict, and everything carrying signed material re-verifies |
 
 The light cannot read green while a claim carrying signed material fails
 re-verification: an envelope stapled onto another row, a signed field rewritten
@@ -402,7 +403,7 @@ mareforma export --bundle
 mareforma export --bundle --output /tmp/release.bundle.json
 ```
 
-The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mare:Claim` node with `claimText`, `classification`, `supportLevel`, `generatedBy`, `supports`, `contradicts`, `sourceName`, and `artifactHash` fields.
+The JSON-LD output uses `mare:` and `schema:` vocabularies. Each claim is a `mare:Claim` node with `claimText`, `classification`, `claimStatus`, `generatedBy`, `dateCreated`, `supports`, `contradicts`, `sourceName`, and `artifactHash` fields. There is no `supportLevel` term: it carried the retired support ladder, so a consumer keyed on it finds it absent rather than frozen at a value.
 
 ---
 
@@ -422,7 +423,7 @@ For a bundle, this checks the DSSE signature (over the DSSE PAE encoding, so it 
 
 Auditor mode verifies against enrolled validator pubkeys only, so a signed claim whose signer is **not an enrolled validator** cannot be authenticated: the claim's binding is all that could be checked, never its signature. `verify` exits **2** on such a claim, not 0. Exit 2 is the unverifiable verdict, not a failure: enrol the signer's key and run it again to reach one. A CI gate built on `verify` therefore no longer passes a claim carrying an all-zero signature under a keyid that was never enrolled, and a gate that treats 2 as a failure will stop a claim that may be perfectly sound. Route 2 to "cannot tell yet", and reserve 1 for a definite failure.
 
-Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them: it attests each claim's asserter content and earned support level, not a mutable status flag.
+Editorial status (`retracted` / `contested`) and comparison summaries carry no signature in the data model, so a verified bundle does not attest them: it attests each claim's asserter content and the validation envelopes that claim carries, not a mutable status flag.
 
 ```bash
 mareforma verify TARGET [OPTIONS]

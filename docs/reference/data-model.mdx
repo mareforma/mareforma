@@ -4,7 +4,7 @@ description: "All claim fields, indexes, triggers, and supporting tables in grap
 ---
 
 All persistent state lives in a single SQLite file at `<project_root>/.mareforma/graph.db`
-(WAL mode, ACID). Schema version: `1`.
+(WAL mode, ACID). Schema version: `2`.
 
 ## Claims table
 
@@ -41,7 +41,7 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `t_invalid` | INTEGER | `NULL` | Yes | Invalidation timestamp set by the `contradiction_invalidates_older` trigger when a signed `contradiction_verdicts` row references this claim. Default `query()` / `search()` excludes invalidated rows; pass `include_invalidated=True` for audit-mode listings |
 | `predicate_payload` | TEXT | `''` | No | Typed predicate body denormalized for `predicate_type` filtering without parsing the claim text JSON. Query-side only: NOT bound into the signed envelope or chain hash, and NOT compared during idempotency reconciliation |
 | `original_signature_bundle` | TEXT | `NULL` | Yes | On a federation-imported claim, the original signature envelope from the source graph. The active `signature_bundle` carries the receiver's re-signed envelope; verifiers that want the source-side proof read this. NULL on claims that were not federation-imported |
-| `observed_grounding` | TEXT | `NULL` | Yes | The computed grounding axis (distinct from the declared `classification`), stored as a JSON verdict record: `version`, `grounding` (`GROUNDED` / `UNGROUNDED` / `OPAQUE`), `reason`, `cited_sources`, `grounded_sources`, and `receipt_digest`. Written from the same record bound into the signed predicate, so this is a queryable denormalization the split measurement and the promotion gate read while the signed envelope stays authoritative. NULL on every claim asserted without the observer (including rows predating this column); a NULL here means the signed predicate omits the field too, so the signed bytes stay byte-identical to a pre-observer claim |
+| `observed_grounding` | TEXT | `NULL` | Yes | The computed grounding axis (distinct from the declared `classification`), stored as a JSON verdict record: `version`, `grounding` (`GROUNDED` / `UNGROUNDED` / `OPAQUE`), `reason`, `cited_sources`, `grounded_sources`, and `receipt_digest`. Written from the same record bound into the signed predicate, so this is a queryable denormalization the split measurement reads while the signed envelope stays authoritative. NULL on every claim asserted without the observer (including rows predating this column); a NULL here means the signed predicate omits the field too, so the signed bytes stay byte-identical to a pre-observer claim |
 | `created_at` | TEXT | UTC now | No | ISO 8601 UTC timestamp |
 | `updated_at` | TEXT | UTC now | No | ISO 8601 UTC; updated on every mutation |
 
@@ -60,17 +60,24 @@ All persistent state lives in a single SQLite file at `<project_root>/.mareforma
 | `idx_claims_asserter_keyid` | `asserter_keyid` | Non-unique (partial) | `WHERE asserter_keyid IS NOT NULL`: the independence axis |
 | `idx_claims_idempotency_key` | `idempotency_key` | Unique (partial) | `WHERE idempotency_key IS NOT NULL` |
 | `idx_claims_prev_hash` | `prev_hash` | Unique (partial) | `WHERE prev_hash IS NOT NULL`: catches branched chains from concurrent writers or manual SQL tamper |
-| `idx_claims_validator_keyid` | `validator_keyid` | Non-unique (partial) | `WHERE validator_keyid IS NOT NULL`: reputation aggregation |
+| `idx_claims_validator_keyid` | `validator_keyid` | Non-unique (partial) | `WHERE validator_keyid IS NOT NULL`: the unsigned denormalisation beside the envelope |
+| `idx_claims_validation_signer` | `json_extract(validation_signature, '$.signatures[0].keyid')` | Non-unique (partial expression) | `WHERE validation_signature IS NOT NULL`: the reputation count groups by the signer named inside the signed envelope, so this is the index that expression needs. Without it the count is a full table scan plus a temp b-tree on every enumerating read |
+| `idx_claims_read_order` | `created_at DESC` | Non-unique | The order `query()` returns claims in |
 | `idx_replication_cluster` | `cluster_id` | Non-unique | On `replication_verdicts` |
 | `idx_replication_member` | `member_claim_id` | Non-unique | On `replication_verdicts` |
 | `idx_contradiction_member` | `member_claim_id` | Non-unique | On `contradiction_verdicts` |
+| `idx_contradiction_other` | `other_claim_id` | Non-unique | On `contradiction_verdicts`: the other side of the pair |
+| `idx_find_claim` | `claim_id` | Non-unique | On `findings`: the claim a finding rides |
+| `idx_contrast_line` | `line_id` | Non-unique | On `contrasts`: the evidence line a contrast belongs to |
 | `idx_rekor_inclusions_uuid` | `uuid` | Non-unique | On `rekor_inclusions`: looks up an inclusion by its Rekor UUID |
 
 ## State-machine triggers
 
-Two `BEFORE` triggers enforce the support-level state machine at the storage layer. Defense in depth: a tampered Python interpreter cannot relax these rules.
+Triggers enforce at the storage layer the rules a claim cannot be edited out of. Defense in depth: a tampered Python interpreter cannot relax these rules.
 
 **`claims_update_status_terminal`**: `retracted` is terminal. Any UPDATE that transitions a row out of `retracted` raises `mareforma:state:retracted_is_terminal`. To resurrect a withdrawn finding, assert a new claim citing the old via `contradicts=[<old_claim_id>]`.
+
+**`claims_validation_is_terminal`**: a recorded validation is terminal. BEFORE UPDATE of `validation_signature`, `validator_keyid`, `validated_by` or `validated_at` on a row that already carries a `validation_signature`, any change to one of those four raises `mareforma:append_only:validation_is_terminal`. The row holds one signed envelope, so overwriting it would erase the first attestation and leave the graph no record that it was ever there. To revise, retract the claim and assert a new one.
 
 **`claims_signed_fields_no_laundering`**: append-only over the signed predicate. It lives in `_SIGNED_FIELDS_TRIGGER_SQL` rather than `_SCHEMA_SQL`, so every `open_db()` drops and re-creates it and an existing database gains the current watch list. Refuses any direct-SQL UPDATE that changes a signed-predicate value (`text`, `classification`, `generated_by`, `supports_json`, `contradicts_json`, `source_name`, `artifact_hash`, `ev_*`, `evidence_json`, `statement_cid`, `prev_hash`, `created_at`), the `asserter_keyid` denormalisation, the `observed_grounding` verdict, or the `predicate_payload` the audit path re-checks a GROUNDED verdict against, on a row whose `signature_bundle IS NOT NULL`. Value-comparison fires only when something actually changed, so multi-column UPDATEs that re-emit unchanged values (e.g. status-only edits via `update_claim`) pass through. It also refuses to set `signature_bundle` back to NULL on a signed row, because that one write would clear the guard on this trigger and on `claims_signed_no_delete`; the Rekor attachment's non-NULL rewrite stays legal. Raises `mareforma:append_only:signed_field_locked`.
 
@@ -163,7 +170,7 @@ Removal is intentionally unsupported currently; validator history is append-only
 
 ## project_policy table
 
-A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. It carries `rekor_required` (findings must be witnessed by the transparency log before they can converge, backing `require_rekor_witnessing`) and `strict_promotion_required` (a converging pair must carry data on both sides, backing `open(strict_promotion=True)`). Both are one-way once declared and bind every writer, not just the handle that declared them. The signed `envelope` is the authority; the flat columns are a denormalized read cache. The envelope payload carries its own version, so a declaration signed before a flag existed keeps verifying under the field list it was signed with. Extending the policy re-signs the row, which moves `created_at`, so each flag also carries the time it was first declared and a check that grandfathers earlier claims reads that instead. Restore verifies the envelope against the enrolled root before enforcing.
+A root-signed, single-row (`id = 1`) declaration of project-wide trust policy. It carries `rekor_required` (findings must be witnessed by the transparency log before they can converge, backing `require_rekor_witnessing`) and `strict_promotion_required` (a converging pair must carry data on both sides, which the `open(strict_promotion=True)` flag declared before that flag was removed). Both are one-way once declared and bind every writer, not just the handle that declared them. The signed `envelope` is the authority; the flat columns are a denormalized read cache. The envelope payload carries its own version, so a declaration signed before a flag existed keeps verifying under the field list it was signed with. Extending the policy re-signs the row, which moves `created_at`, so each flag also carries the time it was first declared and a check that grandfathers earlier claims reads that instead. Restore verifies the envelope against the enrolled root before enforcing.
 
 | Field | Type | Description |
 |---|---|---|

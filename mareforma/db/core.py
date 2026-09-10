@@ -122,7 +122,7 @@ def _serialize_observed_grounding(record: dict | None) -> str | None:
     record bound into the signed predicate. ``None`` stays NULL, the column
     default, so a claim asserted without the observer writes exactly the bytes
     it did before this field existed. The signed envelope is authoritative; this
-    column is the denormalisation the split measurement and the promotion gate
+    column is the denormalisation the split measurement
     read.
     """
     if record is None:
@@ -328,7 +328,7 @@ def _policy_window(conn: sqlite3.Connection):
     """Open the project-policy marker for the statements inside the block.
 
     The one write that replaces the singleton policy row runs inside one, for
-    the reason the promotion window exists: the guard on the table refuses an
+    the reason the sibling windows exist: the guard on the table refuses an
     UPDATE that no mareforma writer opened, and the marker is a temp table, so
     it lives on this connection and dies with it. Nesting is not expected (only
     :func:`set_project_policy` opens one) so the block simply creates and drops.
@@ -1858,7 +1858,7 @@ def _ensure_claims_columns_for_upgrade(
     Returns the set of columns this call actually added (empty when the db
     is already current, or when a concurrent opener won every ALTER race).
     The caller uses an ``asserter_keyid`` entry to fire the one-time
-    legacy-promotion grandfather event exactly once.
+    one-time legacy grandfather event exactly once.
 
     ``predicate_payload``, ``original_signature_bundle``, and
     ``asserter_keyid`` are query-side fields that are NOT part of the
@@ -2460,7 +2460,7 @@ def _state_error_from_integrity(
     if "mareforma:state:" in msg:
         # Extract the suffix after the prefix for callers that want to
         # pattern-match. The full SQLite message looks like:
-        #   IntegrityError: mareforma:state:illegal_transition:from_preliminary
+        #   IntegrityError: mareforma:state:retracted_is_terminal
         # (Static suffixes only, SQLite < 3.46 rejects `'prefix:' || NEW.x`
         # in RAISE() as a syntax error. See the schema preamble.)
         marker = "mareforma:state:"
@@ -2498,8 +2498,8 @@ def normalize_artifact_hash(value: str | None) -> str | None:
     into the claim envelope and read as a secondary collapse check: two
     peers citing the same upstream that both supply an EQUAL hash are
     one line of evidence (a byte-identical rerun is not corroboration)
-    and do not promote on their own. Distinct hashes, or an absent hash
-    on either side, never block the distinct-signer axis.
+    and count once. Distinct hashes, or an absent hash on either side,
+    never block the signer axis.
 
     Accepts canonical hex digests only: no ``sha256:`` prefix, no
     base64, no whitespace. Case is normalised to lowercase so two
@@ -5301,7 +5301,7 @@ def get_claim(
 
     *verify_cache* lets a caller reading several claims share one cache, the
     way :func:`list_claims` shares one across its rows: the peer evidence
-    behind a promoted row is verified once for the caller's whole read instead
+    behind a validated row is verified once for the caller's whole read instead
     of once per claim. A fresh cache when it is omitted.
     """
     try:
@@ -7625,7 +7625,7 @@ def project_policy_unverified(conn: sqlite3.Connection) -> bool:
     the signed envelope no longer binds it. :func:`_verified_project_policy` then
     hands every caller the strictest possible policy (both rules on, declared
     before every claim), which is correct as a defence but silent as a signal.
-    An operator meets it as a promotion held closed or a restore refusing the
+    An operator meets it as a policy declaration refused or a restore refusing the
     backup, with nothing on ``mareforma status`` to say why. This predicate is
     what ``health()`` and ``status`` read to name it.
     """

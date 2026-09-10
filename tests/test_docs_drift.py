@@ -614,6 +614,41 @@ def test_data_model_documents_every_table_the_schema_creates():
     assert not missing, f"data-model.mdx documents no table named: {missing}"
 
 
+def test_docs_state_the_schema_version_the_code_writes():
+    """every schema version a page states has to be the one on disk.
+
+    The version sat at 1 for the whole 0.3 series, so no page had ever had to
+    move it and nothing checked. This release moves it to 2, and the data-model
+    page carried both: a header saying 1 and a ``schema()`` snippet saying 2, on
+    the same page. A reader auditing ``PRAGMA user_version`` against the header
+    reads a mismatch as tamper.
+
+    Matches the two shapes the pages use, the prose header and the ``schema()``
+    snippet comment, rather than every bare integer, so an unrelated number is
+    not dragged in.
+    """
+    from mareforma.db import _SCHEMA_VERSION
+
+    patterns = (
+        re.compile(r"Schema version:\s*`(\d+)`"),
+        re.compile(r'schema_version"\]\s*#\s*(\d+)'),
+    )
+    wrong = []
+    for page in sorted(DOCS.rglob("*.mdx")) + [
+        ROOT / "AGENTS.md", ROOT / "ARCHITECTURE.md", ROOT / "README.md",
+    ]:
+        if page.name == "changelog.mdx":
+            continue  # a released entry states the version of its own release
+        text = page.read_text(encoding="utf-8")
+        for pattern in patterns:
+            for found in pattern.findall(text):
+                if int(found) != _SCHEMA_VERSION:
+                    wrong.append(f"{page.name}: states schema version {found}")
+    assert not wrong, (
+        f"schema version is {_SCHEMA_VERSION} on disk; " + "; ".join(sorted(wrong))
+    )
+
+
 def test_bundle_pages_state_the_completeness_bound():
     """every page that describes what a verified bundle proves says what it
     does not prove about the claim set.
@@ -1517,8 +1552,14 @@ def test_api_keeps_the_declared_and_observed_grounding_axes_apart():
 
     ``grounding_sensor`` writes the asserter's own score into the signed
     evidence vector and never touches the ``observed_grounding`` column, the
-    axis that gates promotion. A table row saying the sensor computes the
+    axis a reader is told to trust. A table row saying the sensor computes the
     observed verdict collapses the one distinction the product rests on.
+
+    The observed row has to say what the record is FOR, not only where it is
+    stored: a row that reads as one more queryable column invites a caller to
+    treat the two axes as interchangeable. It used to say the record gated
+    promotion, which was the answer while the ladder existed. It sets the
+    trust map's grounding axis now, and that is what the row has to name.
     """
     api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
     section = _section(api, "### `assert_claim(")
@@ -1536,8 +1577,8 @@ def test_api_keeps_the_declared_and_observed_grounding_axes_apart():
     observed_row = next(
         line for line in section.splitlines() if line.startswith("| `observed_grounding`")
     )
-    assert "promotion" in observed_row, (
-        "the observed_grounding row must say the record gates promotion, not "
+    assert "grounding axis" in observed_row, (
+        "the observed_grounding row must name the axis the record sets, not "
         "only that it is stored in a queryable column"
     )
 

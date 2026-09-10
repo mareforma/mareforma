@@ -172,9 +172,9 @@ Assert a claim into the graph. Returns `claim_id` (UUID string).
 | `source_name` | `str \| None` | `None` | Data source name. Required for ANALYTICAL to be meaningful. |
 | `idempotency_key` | `str \| None` | `None` | Retry-safe key. Same key → same claim_id, no INSERT. |
 | `status` | `str` | `"open"` | `open` \| `contested` \| `retracted` |
-| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. The column a strict-promotion project reads. |
+| `artifact_hash` | `str \| None` | `None` | SHA-256 hex digest of the output bytes backing the claim. Secondary collapse check: equal data collapses two peers to one line (a byte-identical rerun is not corroboration), distinct data counts as independent, absent data (NULL) never blocks. It is the data axis of the effective-independence count. |
 | `evidence` | `dict \| None` | `None` | Optional opaque evidence-vector dict for the claim, denormalised into the `ev_*` columns and stored as `evidence_json`. Carried inside the signed predicate; mareforma does not interpret it. |
-| `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` never counts toward promotion. |
+| `observed_grounding` | `dict \| None` | `None` | Signed grounding verdict from an `observe()` scope (`obs.verdict.to_signed_dict()`). Bound into the signed statement; a verdict that is not `GROUNDED` gates nothing, it sets the grounding axis of `trust_map()`. |
 | `finding_record` | `dict \| None` | `None` | Set by `submit_finding`, not by hand: the signed record of a finding's verdict inputs (proposition, plan, datasets, bearing, and a digest over its estimate line set). Bound into the signed statement only when present, so a plain claim signs identically; a verdict re-derives against it on read. |
 | `grounding_sensor` | `object \| None` | `None` | Optional sensor exposing `grounding_score(text, supports) → (float, str)`. Its score and rationale are written into the claim's evidence vector. A sensor that raises is caught and the claim is asserted without a grounding score. |
 | `signer` | `object \| None` | `None` | Per-call override for the graph's loaded key (an Ed25519 private key from `signing.load_private_key`). `None` inherits the key from `mareforma.open(key_path=...)`. Not checked against the `validators` table: anyone can sign, only enrolled keys can `validate()` a claim. Use it on a host holding several keys, one per asserter. |
@@ -194,7 +194,7 @@ asserter.
 ### `graph.query(text=None, *, ...) → list[dict]`
 
 Query claims from the graph. Returns a list of claim dicts ordered by
-support level (descending) then recency (descending).
+recency, newest first.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -257,7 +257,7 @@ LIKE substring matching; `search()` uses FTS5 ranked match.
 
 Returns `{validator_keyid: count}` for every enrolled validator. Count is
 the number of claims whose validation envelope was signed by
-that keyid. Validators with zero promotions appear with `count=0`. Derived
+that keyid. Validators that have signed none appear with `count=0`. Derived
 state: recomputed on every call; never cached.
 
 ---
@@ -337,7 +337,7 @@ project's `validators` table. The first key opened against a fresh
 graph auto-enrolls as the root validator. The validation event itself
 is signed: a DSSE-style envelope binding `(claim_id, validator_keyid,
 validated_at, evidence_seen)` is persisted to the row's
-`validation_signature` column, so the promotion is independently
+`validation_signature` column, so the validation is independently
 verifiable.
 
 `validated_by` is a cosmetic display label. The authenticated identity
@@ -452,8 +452,8 @@ for any candidate list before insertion.
 
 ### `mareforma.schema() → dict`
 
-Return the full epistemic schema: valid values, defaults, and state
-transitions. Call this before making any assertions to inspect the system.
+Return the full epistemic schema: the valid values a claim can hold, and
+their defaults. Call this before making any assertions to inspect the system.
 
 ```python
 s = mareforma.schema()
@@ -608,9 +608,10 @@ in supports[] are not graph nodes and skipped.
 output bytes: figure, CSV, model) is a secondary collapse check, not a
 match requirement. When two converging peers BOTH supply a hash and the
 hashes are EQUAL, the two lines collapse to one: a byte-identical rerun is
-the same output, not corroboration, so an equal-hash pair does not promote
-on data alone. Distinct hashes count as two independent lines. When either
-peer omits the hash, data never blocks: distinct signing keys alone promote.
+the same output, not corroboration, so an equal-hash pair does not count as
+two lines on data alone. Distinct hashes count as two independent lines. When
+either peer omits the hash, data never blocks: the model and signer axes carry
+the count on their own.
 The hash is part of the signed payload, so an attacker who edits the column
 without the private key breaks verification.
 
@@ -726,7 +727,7 @@ disclosure). Full reference:
 
 ## Claim status
 
-Status is an editorial signal, separate from support level.
+Status is an editorial signal, separate from the derived trust axes.
 
 | Value | Meaning |
 |---|---|
@@ -887,10 +888,10 @@ the envelope proving one did (CHECK constraint), and a second validation
 is refused rather than written over the first. A trigger on `status` makes
 `retracted` terminal. Transitions out of retracted are refused, so
 the only way to resurrect a withdrawn finding is to assert a new
-claim citing the old via `contradicts=`. Illegal transitions raise
+claim citing the old via `contradicts=`. A refused transition raises
 `IllegalStateTransitionError` carrying the trigger's static suffix
-(`illegal_transition:from_preliminary` and its siblings) instead of
-an opaque `CHECK CONSTRAINT FAILED` message.
+(`retracted_is_terminal`) instead of an opaque
+`CHECK CONSTRAINT FAILED` message.
 
 The `claims` table also carries a `prev_hash` append-only hash chain
 (`sha256(prev_chain_link || canonical_statement_bytes)`) with a UNIQUE
@@ -1098,12 +1099,12 @@ graph.record_contradiction_verdict(
 direct INSERT with a fabricated `issuer_keyid` or `member_claim_id`
 fails at the SQL layer.
 
-**`t_invalid` is terminal.** `validate_claim` refuses to promote a
-claim with `t_invalid IS NOT NULL`. A signed contradiction verdict
-is terminal evidence; the trust ladder will not lift an already-refuted
-claim. Likewise the promotion UPDATE inside `record_replication_verdict`
-filters `AND t_invalid IS NULL`, so a replication verdict landing after
-a contradiction cannot silently re-promote the invalidated claim.
+**`t_invalid` is terminal.** `validate_claim` refuses to record a
+validation on a claim with `t_invalid IS NOT NULL`. A signed contradiction
+verdict is terminal evidence, and a signed attestation must not read as one
+that outlived it. Its guarded UPDATE carries the same filter, so a
+contradiction landing while the call is working takes the row rather than
+losing to it.
 
 ```python
 # Listing verdicts. Default excludes verdicts on invalidated claims.

@@ -43,8 +43,8 @@ Mareforma is that combination. It is **not** trying to replace:
 ## Rails, not trains
 
 Mareforma ships **the rails**: the storage layer, the signing
-discipline, the trust-ladder state machine, the convergence-detection
-SQL, the restore-from-TOML recovery path. What it deliberately does
+discipline, the write guards the storage layer enforces, the
+restore-from-TOML recovery path. What it deliberately does
 **not** ship, the **trains** that produce verdicts, lives outside
 the OSS:
 
@@ -87,7 +87,6 @@ db.add_claim (mareforma/db/core.py)
   │                       + asserter_keyid denormalized from the envelope)
   │ ─ COMMIT
   │ ─ optionally submit to Rekor (if rekor_url= was passed)
-  │ ─ _maybe_update_replicated() : detect convergence
   │ ─ _backup_claims_toml() : write the TOML mirror (post-commit;
   │                            see "What survives restore" for the
   │                            crash-window gap)
@@ -150,10 +149,10 @@ adding any signed field:
   supporting checks) and reads `UNVERIFIABLE` where a supporting line's
   model lineage is too soft to certify a distinct model.
   `--json` and `--html` emit the same map for CI or review.
-- `mareforma verify <claim>` re-checks the signatures, the
-  grounding-to-citation binding, and the displayed support level, and
-  exits on a stable four-code contract: `0` verified, `1` tampered, `2`
-  unverifiable, `3` usage error. Example 06 wires it as a CI gate.
+- `mareforma verify <claim>` re-checks the signatures, that the signer is
+  enrolled, and the grounding-to-citation binding, and exits on a stable
+  four-code contract: `0` verified, `1` tampered, `2` unverifiable, `3`
+  usage error. Example 06 wires it as a CI gate.
 - `mareforma diagnose -- python run.py` runs a target in-process under
   the grounding observer and reports what data actually flowed and
   where a silent fallback hid; with `--cites` it also computes the
@@ -196,14 +195,13 @@ placement live in `mareforma/trust_map.py`.
 
 ## Trust layer
 
-The stored ladder above is the legacy per-claim axis. The trust layer
-(`mareforma.trust`) is where the derived axes come from: a structured model for a
-single content-addressed proposition, computed on every read. It is additive:
-seven new tables, schema stays at v1, and every finding still rides a signed
-claim. `graph.proposition_status(prop)` returns both derived axes under the keys
-`status` (the answer, per `content_id`, a `Status` enum value) and
-`question_status` (the question, per `frame_id`). A `frame_status` key
-deprecated for v0.4.0 in favour of `question_status`.
+The trust layer (`mareforma.trust`) is where the derived axes above come from: a
+structured model for a single content-addressed proposition, computed on every
+read. It is additive: seven tables of its own, no column on the claim, and every
+finding still rides a signed claim. `graph.proposition_status(prop)` returns both
+derived axes under the keys `status` (the answer, per `content_id`, a `Status`
+enum value) and `question_status` (the question, per `frame_id`). It carried a
+`frame_status` key that echoed the answer's own word; that key is gone.
 
 ```
 Proposition (content_id, frame_id)
@@ -279,7 +277,7 @@ Three rules:
 The graph methods (`register_proposition`, `register_plan`, `submit_finding`,
 `assert_finding`, `proposition_status`, `query_frame`) live in
 [`mareforma/_graph.py`](mareforma/_graph.py); the SQL is in
-[`mareforma/trust/_store.py`](mareforma/trust/_store.py) and the six tables in
+[`mareforma/trust/_store.py`](mareforma/trust/_store.py) and the seven tables in
 `db/_schema_sql.py`. `register_plan` pre-registers the decision rule as its own
 signed plan attestation before the numbers are seen, and `submit_finding` binds
 an outcome to it, signing the plan → finding edge into the finding claim's
@@ -378,7 +376,7 @@ body)`) with these payload types:
 | `application/vnd.in-toto+json` (Statement v1) | Per-claim assertion (text + classification + supports + contradicts + source + artifact_hash + evidence + created_at, plus an optional versioned `observed_grounding` verdict when the observer recorded one) |
 | `application/vnd.mareforma.validator-enrollment+json` | Per-validator enrollment (keyid + pubkey + identity + validator_type + parent) |
 | `application/vnd.mareforma.validation+json` | Per-validation event (claim_id + validator_keyid + validated_at + evidence_seen) |
-| `application/vnd.mareforma.seed-claim+json` | Per-seed bootstrap (claim_id + validator_keyid + seeded_at) |
+| `application/vnd.mareforma.seed+json` | Per-seed bootstrap (claim_id + validator_keyid + seeded_at) |
 | `application/vnd.mareforma.replication-verdict+json` | Per-replication verdict from an issuer |
 | `application/vnd.mareforma.contradiction-verdict+json` | Per-contradiction verdict from an issuer |
 
@@ -453,9 +451,7 @@ Tables:
 
 - `claims`: every assertion. Includes denormalized `ev_*` columns for
   query, the full `evidence_json` for round-trip, the
-  `signature_bundle` DSSE envelope, a `prev_hash` chain link, and the
-  operational flags
-  when a swallowed error needs operator follow-up.
+  `signature_bundle` DSSE envelope, and a `prev_hash` chain link.
 - `validators`: per-project enrolled-validator chain, rooted at a
   self-signed row. Singleton-root invariant: more than one self-signed
   row → entire chain forfeit. Append-only and no-delete at the trigger
@@ -550,7 +546,7 @@ about them.
 | Rule | Trigger or constraint | Refuses |
 |---|---|---|
 | a validation nobody signed | `CHECK` on `claims` | a row setting `validated_by` or `validated_at` with `validation_signature` NULL, which is a row asserting a human sign-off with nothing proving one |
-| a second validation over the first | the `validation_signature IS NULL` clause on `validate_claim`'s UPDATE | replacing one validator's signed attestation with another's, which would erase the first with nothing recording it had been there |
+| a second validation over the first | `claims_validation_is_terminal`, with the `validation_signature IS NULL` clause on `validate_claim`'s UPDATE behind it | replacing one validator's signed attestation with another's, which would erase the first with nothing recording it had been there. The Python clause bound only callers who came through this library; the trigger binds direct SQL too |
 | status = 'retracted' is terminal | `claims_update_status_terminal` | the resurrection attack, where a born-retracted claim is later flipped back to 'open' |
 | signed claims are append-only over the predicate | `claims_signed_fields_no_laundering` | direct-SQL UPDATE of `text` / `classification` / `generated_by` / `supports_json` / `contradicts_json` / `source_name` / `artifact_hash` / `ev_*` / `evidence_json` / `observed_grounding` / `statement_cid` / `prev_hash` / `created_at` / `asserter_keyid` / `predicate_payload` on a row with `signature_bundle IS NOT NULL`, and any UPDATE that sets `signature_bundle` back to NULL on such a row |
 | signed claims cannot be deleted | `claims_signed_no_delete` | the wipe-and-rewrite attack where a Rekor-logged claim is deleted from `graph.db` and `claims.toml` is regenerated as if it never existed |
@@ -642,7 +638,7 @@ this is the consolidated view.
 | Colluding agents presenting two signing keys as two independent lines | distinct `asserter_keyid` is a cryptographic distinctness signal, not a proof of apparatus independence: one party can hold two keys. The trust map reports it as a number on its own axis rather than a word on the claim, and marks it `UNVERIFIABLE` when the lineage is too soft to certify. `single_trust_domain` discloses when all validators share one root, but does not prevent Sybils |
 | A gate input flipped consistently across every table that carries it, with the guarding triggers dropped first | `plan_id` and `preregistered` are not in `SIGNED_FIELDS`, so the read path re-derives `plan_id` against the value the finding's claim recorded (itself guarded only by `claims_signed_fields_no_laundering`) and cannot re-derive `preregistered` at all. A writer with SQL access who drops the append-only triggers and rewrites both `findings.plan_id` and the claim's recorded copy, or flips `preregistered` on a plan, defeats the read check: this binding rests on the triggers plus the claim signature, not on the gate input being a signed field. A single-column edit is still caught |
 | Erasure of a refutation by deleting the `findings` row it hangs from, with the append-only triggers dropped first | The count enumerates from `findings`, so removing that row removes the anchor there is anything to re-derive against. Every other tamper on this path drops the line and discloses it; this one leaves no line to drop. A contested proposition then reads CONVERGENT with `independent_refute` at 0, `lines_skipped` at 0, and nothing on the health channel, and the state survives a backup and restore. Deleting a supporting row is the same mechanism pointing the safe way, and is the case the suite pins. Closing this needs an anchor outside the database, which is why the design defers it rather than papering over it |
-| Resurrection of a retracted claim through an edited backup replayed by restore | `status` is editorial and carries no signature, so nothing re-derives it, and `claims_update_status_terminal` fires before an UPDATE, which restore's INSERT never performs. A writer who can edit `claims.toml` flips `retracted` back to `open` with no key and no SQL access, and restore accepts it without a warning. What the claim says is unaffected: its text, provenance and support level still have to verify. Treat a retraction as an editorial signal, and the signed content as the record |
+| Resurrection of a retracted claim through an edited backup replayed by restore | `status` is editorial and carries no signature, so nothing re-derives it, and `claims_update_status_terminal` fires before an UPDATE, which restore's INSERT never performs. A writer who can edit `claims.toml` flips `retracted` back to `open` with no key and no SQL access, and restore accepts it without a warning. What the claim says is unaffected: its text and its provenance still have to verify against the signature. Treat a retraction as an editorial signal, and the signed content as the record |
 | Misclassified `INFERRED` / `ANALYTICAL` / `DERIVED` | declared by the agent, not verified |
 | Colluding log operator publishing two checkpoints to different audiences | needs gossip / witness protocols, out of scope for the single-checkpoint trust model |
 | Compromised log signing key | mareforma trusts whichever pubkey the caller pinned via TOFU; rotation requires deleting the pin |
@@ -654,12 +650,11 @@ this is the consolidated view.
 For the reader who wants to read the actual enforcement:
 
 - **State-machine triggers**: [`mareforma/db/_schema_sql.py`](mareforma/db/_schema_sql.py) `_SCHEMA_SQL`
-  (search for `claims_insert_state_check`, `claims_update_state_check`,
-  `claims_update_status_terminal`, `claims_signed_no_delete`).
+  (search for `claims_update_status_terminal`,
+  `claims_validation_is_terminal`, `claims_signed_no_delete`).
   `claims_signed_fields_no_laundering` lives in `_SIGNED_FIELDS_TRIGGER_SQL`,
   re-created on every `open_db()` so an existing database gains the current
   watch list
-- **Convergence detection**: `_maybe_update_replicated_unlocked` in [`mareforma/db/core.py`](mareforma/db/core.py) (distinct `asserter_keyid` + equal-data collapse)
 - **Verify-on-read**: `_row_verified_on_read`, `_verify_validation_on_read`,
   `_verify_participant_bundle_on_read` in `db/core.py`, wired into `get_claim`,
   `query_claims`, and `query_provenance`
@@ -775,9 +770,10 @@ bind time; a GROUNDED whose cited set is disjoint downgrades to OPAQUE with a
 signed reason and a `grounding_citation_mismatch` health event, or raises in
 strict mode. The check re-runs on read as pure string comparison over stored
 normalized identifiers, so a cross-host claim whose paths do not exist on the
-verifier is never false-flagged. A verdict that is not `GROUNDED` never counts
-toward support-level promotion; grounding is a necessary floor, never
-sufficient.
+verifier is never false-flagged. A verdict that is not `GROUNDED` sets the trust
+map's grounding axis to `UNGROUNDED` or `OPAQUE` and is what `mareforma verify`
+re-checks. It gates nothing else: grounding is one axis a reader weighs beside
+the independence number, not a floor a claim has to clear first.
 
 `mareforma observe --doctor` reports which loaders are wrapped and which seams
 force OPAQUE in the current environment; `mareforma measure` aggregates a run's
@@ -911,9 +907,8 @@ conventions, applied consistently:
   actually opened those claims, only that the claims they cited
   exist and predate validation. That's the strongest property
   mareforma can enforce; everything else rests on the validator's
-  honesty."* The same pattern recurs in `_refuse_self_validation`,
-  in `_maybe_update_replicated_unlocked`, and in the
-  `claims_signed_fields_no_laundering` trigger.
+  honesty."* The same pattern recurs in `_refuse_self_validation`
+  and in the `claims_signed_fields_no_laundering` trigger.
 - **Core over surface.** When a defect is found, the fix lands
   at the root layer (DB trigger, signed payload field set, state
   machine) rather than in the wrapper. The public Python API
