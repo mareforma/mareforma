@@ -87,7 +87,7 @@ class TestValidateRefusesNonOpen:
 
 
 # ---------------------------------------------------------------------------
-# seed=True refuses non-open status
+# Retracted is terminal
 # ---------------------------------------------------------------------------
 
 

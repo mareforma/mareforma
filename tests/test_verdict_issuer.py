@@ -138,18 +138,29 @@ class TestRecordReplicationVerdict:
 # Verdict-path promotion gates: grounding, signer, transparency
 # ---------------------------------------------------------------------------
 
-class TestVerdictPromotionGates:
-    """The verdict path must apply the same computed gates the convergence
-    path applies to a replication verdict too. An enrolled
-    issuer must not be able to launder an UNGROUNDED or unsigned claim into
-    the trust ladder."""
+# ---------------------------------------------------------------------------
+# What a replication verdict does, and what it does not
+# ---------------------------------------------------------------------------
 
-    def test_ungrounded_claim_not_promoted_by_verdict(
+class TestAVerdictIsRecordedWhateverTheClaimsAreGroundedIn:
+    """One behaviour, tested once, under the name of what it actually proves.
+
+    Three tests used to live here, named for gates on the verdict path:
+    UNGROUNDED claims held back, GROUNDED ones let through, a strict project
+    policy refusing a claim with no artifact hash. Those gates went with the
+    support ladder, and the three tests converged on asserting the same
+    surviving fact, that the verdict row is written, under three names that
+    each promised something else. One of them declared no strict policy at all
+    while its comment said the project had declared one.
+
+    Recording a verdict is not a judgement about the claims it names. What a
+    reader makes of them is derived on read, and lives in the trust-layer
+    tests.
+    """
+
+    def test_the_verdict_row_is_written_for_an_ungrounded_claim(
         self, tmp_path: Path,
     ) -> None:
-        # Execution observed 'a' as UNGROUNDED: no real data flowed. A
-        # replication verdict must not count it as a second line, while its
-        # grounded peer 'b' (NULL verdict) still promotes.
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(
             tmp_path, grounding_a={"grounding": "UNGROUNDED"},
         )
@@ -160,19 +171,18 @@ class TestVerdictPromotionGates:
                 method="semantic-cluster", confidence={},
             )
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            # The verdict is still recorded even though 'a' did not promote.
-            assert g.replication_verdicts(member_claim_id=a)
+            recorded = g.replication_verdicts(member_claim_id=a)
+            assert [v["verdict_id"] for v in recorded] == ["rv_ung"]
 
-    def test_grounded_claim_still_promoted_by_verdict(
+    def test_the_verdict_row_is_written_for_a_grounded_claim(
         self, tmp_path: Path,
     ) -> None:
-        # A recorded GROUNDED verdict must NOT block promotion, the gate is
-        # additive, not a new hurdle for honestly grounded claims.
-        #
-        # The verdict is one the observer computed, from a scope that watched a
-        # real file be read. A hand-authored ``{"grounding": "GROUNDED"}`` is a
-        # declaration, stored as OPAQUE, so it would test the gate
-        # against a claim that is not grounded at all.
+        """The observer's own verdict, not a hand-authored one.
+
+        A hand-written ``{"grounding": "GROUNDED"}`` is a declaration and is
+        stored as OPAQUE, so it would exercise this against a claim that is not
+        grounded at all.
+        """
         import mareforma.observe as obs
         from mareforma.observe import ObservedGrounding as OG
 
@@ -181,9 +191,11 @@ class TestVerdictPromotionGates:
         with obs.observe(cites=str(dataset)) as handle:
             dataset.read_text()
         assert handle.verdict.grounding is OG.GROUNDED, handle.verdict.reason
-        record = handle.verdict.to_signed_dict()
+
         root_key, issuer_key, a, b, _, _ = _seed_two_claims(
-            tmp_path, grounding_a=record, grounding_b=record,
+            tmp_path,
+            grounding_a=handle.verdict.to_signed_dict(),
+            grounding_b=handle.verdict.to_signed_dict(),
         )
         with mareforma.open(tmp_path, key_path=issuer_key) as g:
             g.record_replication_verdict(
@@ -191,34 +203,9 @@ class TestVerdictPromotionGates:
                 member_claim_id=a, other_claim_id=b,
                 method="semantic-cluster", confidence={},
             )
-    def test_strict_policy_blocks_hashless_promotion_by_verdict(
-        self, tmp_path: Path,
-    ) -> None:
-        # The project declared strict promotion, so a claim without an
-        # artifact_hash cannot promote. Convergence refuses the pair; an
-        # enrolled issuer's verdict must refuse it too, or the policy binds
-        # only one of the two write paths that reach the same transition.
-        root_key = _bootstrap(tmp_path, "root.key")
-        second_key = _bootstrap(tmp_path, "second.key")
-        issuer_key = _bootstrap(tmp_path, "issuer.key")
-        with mareforma.open(
-            tmp_path, key_path=root_key,
-        ) as g:
-            _enroll_extra(g, second_key, identity="second")
-            _enroll_extra(g, issuer_key, identity="issuer")
-            anchor = g.assert_claim("anchor")
-            a = g.assert_claim("alpha", supports=[anchor])
-        with mareforma.open(tmp_path, key_path=second_key) as g:
-            b = g.assert_claim("beta", supports=[anchor])
-        with mareforma.open(tmp_path, key_path=issuer_key) as g:
-            g.record_replication_verdict(
-                verdict_id="rv_strict", cluster_id="cl_strict",
-                member_claim_id=a, other_claim_id=b,
-                method="semantic-cluster", confidence={},
-            )
         with mareforma.open(tmp_path, key_path=root_key) as g:
-            # The verdict itself is still recorded, only the promotion is held.
-            assert g.replication_verdicts(member_claim_id=a)
+            recorded = g.replication_verdicts(member_claim_id=a)
+            assert [v["verdict_id"] for v in recorded] == ["rv_g"]
 
 class TestContradictionInvalidatesOlder:
     def test_older_claim_gets_t_invalid_set(self, tmp_path: Path) -> None:

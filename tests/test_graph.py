@@ -312,8 +312,8 @@ def test_get_tools_returns_two_callables(tmp_path):
 def test_get_tools_query_returns_valid_json(tmp_path):
     import json
     # Bootstrap a key so the root auto-enrolls and the claim's signing
-    # keyid is in the validators table, the default LLM-tool query
-    # filter () excludes unverified PRELIMINARY.
+    # keyid is in the validators table, which is what the row's
+    # generator_enrolled projection reports.
     key_path = _bootstrap_key(tmp_path)
     with mareforma.open(tmp_path, key_path=key_path) as graph:
         graph.assert_claim("Target T is elevated", classification="ANALYTICAL")
@@ -1187,8 +1187,6 @@ class TestValidationEnvelopeKwargAgreement:
                     evidence_seen=[],
                 )
 
-            # Confirm the claim was NOT promoted.
-
     def test_envelope_kwarg_match_succeeds(self, tmp_path):
         """The standard happy path through graph.validate() (which threads
         both from the same source) stays unaffected."""
@@ -1239,7 +1237,6 @@ class TestValidateClaimRequiresSignedEnvelope:
                     g._conn, g._root, cid_b, validated_by="human-alice",
                 )
             assert not isinstance(excinfo.value, IllegalStateTransitionError)
-            # The claim was not promoted.
 
 class TestValidationEnvelopeCryptographicVerification:
     """``db.validate_claim`` is a public-by-convention graph function.

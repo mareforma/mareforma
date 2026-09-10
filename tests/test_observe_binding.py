@@ -217,28 +217,6 @@ def test_asserting_inside_open_scope_is_refused(tmp_path):
 
 # -- promotion gate ----------------------------------------------------------
 
-def _converge_on_anchor(tmp_path, subject_grounding):
-    """Return the support level of a claim carrying *subject_grounding*.
-
-    The fixture is corroborated by construction: a shared anchor,
-    a GROUNDED peer from a distinct signer citing it, and the claim under test
-    citing the same anchor. So the only thing that can hold the level down is
-    the grounding gate on the convergence path. The peer is GROUNDED on purpose:
-    a non-GROUNDED peer is refused by the candidate SELECT's own clause, which
-    would mask whether the gate on the new claim runs at all.
-    """
-    sa, sb = _two_signers(tmp_path)
-    with open_graph(tmp_path) as g:
-        anchor = g.assert_claim("established anchor")
-        g.assert_claim(
-            "peer from a distinct signer", supports=[anchor],
-            generated_by="lab_b", signer=sb,
-            observed_grounding=_grounded(tmp_path).to_signed_dict(),
-        )
-        subject = g.assert_claim(
-            "claim under test", supports=[anchor], generated_by="lab_a",
-            signer=sa, observed_grounding=subject_grounding.to_signed_dict(),
-        )
 
 
 def test_idempotent_replay_reports_the_stored_verdict(tmp_path):
@@ -294,32 +272,6 @@ def test_idempotent_replay_of_disjoint_verdict_fires_no_event_and_no_raise(tmp_p
     assert "grounding_citation_mismatch" not in ops
 
 
-def test_sql_promotion_guard_fails_closed_on_malformed_column():
-    # The promotion query's grounding guard must fail closed on a malformed or
-    # empty observed_grounding column, matching the Python helper, NOT raise.
-    # SQLite does not short-circuit `json_valid(x) AND json_extract(x, ...)`, so
-    # json_extract is still evaluated and throws "malformed JSON"; the guard
-    # must use CASE. A single corrupt row would otherwise abort the whole
-    # convergence scan. Exercised as a WHERE filter, the way the real query uses
-    # it: only NULL (pre-observer) and GROUNDED rows survive.
-    import sqlite3
-
-    guard = (
-        "col IS NULL OR ("
-        "CASE WHEN json_valid(col) "
-        "THEN json_extract(col, '$.grounding') ELSE NULL END) = 'GROUNDED'"
-    )
-    con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE t(id INTEGER, col TEXT)")
-    con.executemany(
-        "INSERT INTO t(id, col) VALUES (?, ?)",
-        [(1, None), (2, ""), (3, "not json"),
-         (4, '{"grounding":"GROUNDED"}'), (5, '{"grounding":"UNGROUNDED"}')],
-    )
-    survivors = [r[0] for r in con.execute(f"SELECT id FROM t WHERE {guard}")]
-    con.close()
-    # NULL (pre-observer) and GROUNDED promote; '', malformed, UNGROUNDED excluded.
-    assert survivors == [1, 4]
 
 
 # -- verdict-citation binding -----------------------------------------------

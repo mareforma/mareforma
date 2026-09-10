@@ -128,7 +128,6 @@ from .core import (
     # Serialization.
     _serialize_predicate_payload,
     _serialize_observed_grounding,
-    _observed_grounding_promotes,
     # Chain hash.
     _chain_input_for_claim,
     _compute_prev_hash,

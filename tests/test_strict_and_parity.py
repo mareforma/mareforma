@@ -18,32 +18,9 @@ from click.testing import CliRunner
 import mareforma
 from mareforma import signing
 from mareforma.cli import cli
-from mareforma.db import (
-    ProjectPolicyError,
-    get_project_policy,
-    open_db,
-    verify_claim_signatures,
-)
+from mareforma.db import open_db, verify_claim_signatures
 
 
-def _converge(tmp_path: Path, *, strict: bool, ah1, ah2) -> tuple[str, str]:
-    """Two distinct-signer claims sharing an anchor.
-
-    Only k1 (the root) passes the flag: declaring it is a root-signed act, and
-    the second signer is bound by the project policy it wrote.
-    """
-    k1 = tmp_path / "k1"
-    k2 = tmp_path / "k2"
-    signing.bootstrap_key(k1)
-    signing.bootstrap_key(k2)
-    with mareforma.open(tmp_path, key_path=k1) as g:
-        anchor = g.assert_claim("anchor", classification="ANALYTICAL")
-    with mareforma.open(tmp_path, key_path=k1) as g:
-        c1 = g.assert_claim("finding one", classification="ANALYTICAL",
-                            supports=[anchor], artifact_hash=ah1)
-    with mareforma.open(tmp_path, key_path=k2) as g:
-        c2 = g.assert_claim("finding two", classification="ANALYTICAL",
-                            supports=[anchor], artifact_hash=ah2)
 
 
 class TestVerifyClaimSignatures:

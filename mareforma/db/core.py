@@ -301,23 +301,6 @@ def grounding_attestation_state(
     return "attested"
 
 
-def _observed_grounding_promotes(stored: str | None) -> bool:
-    """Whether a stored observed-grounding column permits support-level promotion.
-
-    A NULL column (every claim asserted without the observer) is unaffected and
-    promotes as before. A recorded verdict promotes only when it is GROUNDED;
-    UNGROUNDED and OPAQUE never count toward promotion. Any non-NULL value that
-    is not GROUNDED JSON (including an empty string) is non-promoting
-    (fail-closed): a verdict we cannot read is not a GROUNDED one. This matches
-    the peer-promotion SQL guard, which excludes a non-``json_valid`` column.
-    """
-    if stored is None:
-        return True
-    try:
-        record = json.loads(stored)
-        return record.get("grounding") == "GROUNDED"
-    except (ValueError, TypeError, AttributeError):
-        return False
 
 
 # ---------------------------------------------------------------------------
