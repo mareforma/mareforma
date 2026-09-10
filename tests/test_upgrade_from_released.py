@@ -81,9 +81,27 @@ _BUILD = textwrap.dedent(
     from mareforma import signing
     root = Path(sys.argv[2])
     signing.bootstrap_key(root / "root.key")
+    signing.bootstrap_key(root / "witness.key")
+    witness = signing.load_private_key(root / "witness.key")
     with mareforma.open(root, key_path=root / "root.key") as g:
-        for i in range(6):
+        ids = [
             g.assert_claim("claim %d" % i, generated_by="run%d" % i)
+            for i in range(6)
+        ]
+        g.enroll_validator(
+            signing.public_key_to_pem(witness.public_key()),
+            identity="witness@example.org",
+        )
+    # A second key, a signed contradiction and the chain link that records it,
+    # so the child tables the rebuild could orphan carry rows. Six plain claims
+    # left validators at one and every other child table at zero, so the orphan
+    # check compared zero against zero and passed on an empty graph. This is
+    # the one operation that cannot be undone; its corpus has to have something
+    # in it to lose.
+    with mareforma.open(root, key_path=root / "witness.key") as g:
+        g.record_contradiction_verdict(
+            verdict_id="v1", member_claim_id=ids[1], other_claim_id=ids[0],
+        )
     """
 )
 
@@ -548,7 +566,12 @@ class TestTheUpgradeAUserPerforms:
         _graph_written_by(version, commit, tmp_path / "work", project)
 
         with mareforma.open(project, key_path=project / "root.key") as graph:
-            assert len(graph.search("claim")) == 6
+            # Five of the six: the corpus carries a signed contradiction, and a
+            # default search excludes the claim it invalidated. Asserting the
+            # five is worth more than asserting the six was, because it also
+            # says the invalidation survived the rebuild.
+            assert len(graph.search("claim")) == 5
+            assert len(graph.search("claim", include_invalidated=True)) == 6
 
         conn = sqlite3.connect(_db(project))
         try:

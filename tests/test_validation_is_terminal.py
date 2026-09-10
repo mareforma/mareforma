@@ -187,7 +187,76 @@ class TestTheRuleBindsMoreThanPython:
             assert graph.get_claim(claim_id)["validated_by"] == "alice"
 
 
+class TestTheCheckToWriteWindow:
+    """A contradiction landing mid-call loses the race, it does not ride in.
+
+    ``validate_claim`` checks the claim is open and uninvalidated, then verifies
+    the envelope and the cited evidence, then writes. A signed contradiction
+    that lands between the check and the write would otherwise be overwritten by
+    a validation that was decided before it existed, and the graph would carry a
+    human's sign-off on a claim the record says is invalid.
+
+    The guard is on the UPDATE itself. The class that used to exercise this
+    window went out with the support ladder, and the branch has had nothing
+    reaching it since.
+    """
+
+    def test_a_contradiction_in_the_window_refuses_the_validation(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from mareforma.db import core as _core
+
+        root_key, alice, bob, claim_id = _project_with_two_validators(tmp_path)
+
+        real = _core._verify_evidence_seen
+
+        def land_a_contradiction(conn, promoted_claim_id, evidence_seen, validated_at):
+            """Stand in for a concurrent writer inside the window.
+
+            Called after the gate and before the guarded UPDATE, which is
+            exactly where a racing verdict lands.
+            """
+            real(conn, promoted_claim_id, evidence_seen, validated_at)
+            conn.execute(
+                "UPDATE claims SET t_invalid = ? WHERE claim_id = ?",
+                ("2026-01-01T00:00:00+00:00", promoted_claim_id),
+            )
+
+        monkeypatch.setattr(_core, "_verify_evidence_seen", land_a_contradiction)
+
+        with mareforma.open(tmp_path, key_path=alice) as graph:
+            with pytest.raises(ValueError, match="invalidated by a signed"):
+                graph.validate(claim_id, validated_by="alice")
+
+    def test_the_row_carries_no_validation_afterwards(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A refusal that left the envelope behind would be the worse half."""
+        from mareforma.db import core as _core
+
+        root_key, alice, bob, claim_id = _project_with_two_validators(tmp_path)
+        real = _core._verify_evidence_seen
+
+        def land_a_contradiction(conn, promoted_claim_id, evidence_seen, validated_at):
+            real(conn, promoted_claim_id, evidence_seen, validated_at)
+            conn.execute(
+                "UPDATE claims SET t_invalid = ? WHERE claim_id = ?",
+                ("2026-01-01T00:00:00+00:00", promoted_claim_id),
+            )
+
+        monkeypatch.setattr(_core, "_verify_evidence_seen", land_a_contradiction)
+        with mareforma.open(tmp_path, key_path=alice) as graph:
+            with pytest.raises(ValueError):
+                graph.validate(claim_id, validated_by="alice")
+
+        with mareforma.open(tmp_path, key_path=root_key) as graph:
+            row = graph.get_claim(claim_id)
+            assert row["validation_signature"] is None
+            assert row["validated_by"] is None
+
 class TestReputationCountsTheSigner:
+
+
     """The count groups by the signed thing, not the column beside it.
 
     ``validator_keyid`` is unsigned. Grouping on it credited a validator for a

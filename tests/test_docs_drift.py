@@ -1470,6 +1470,48 @@ def test_api_documents_every_public_graph_member():
     )
 
 
+def test_api_documents_no_graph_member_that_is_gone():
+    """The other direction, and the one nothing was watching.
+
+    The guard above catches a member with no heading. Nothing caught a heading
+    with no member, so a property removed from the class kept its section in
+    the reference, and a reader following it reached an AttributeError. Removing
+    a public surface has to take its documentation with it, and this is what
+    says so.
+
+    Headings are matched the way the forward guard writes them, so the two
+    cannot disagree about what counts as documented.
+    """
+    api = (DOCS / "reference" / "api.mdx").read_text(encoding="utf-8")
+    live = {name for name in vars(mareforma.EpistemicGraph) if not name.startswith("_")}
+    # Only headings that name a bare identifier: `foo` or `foo(...`. Prose
+    # headings and the ones covering module-level functions are not members.
+    documented = {
+        m.group(1)
+        for m in re.finditer(r"^#+ `([a-z_][a-z0-9_]*)[(`]", api, re.MULTILINE)
+    }
+    # The page also documents module-level functions, which a reader imports
+    # from the package that exports them rather than off the graph. Anything
+    # importable somewhere is real; only a name nothing exports is stale.
+    import importlib
+
+    exported: set = set()
+    for module in (
+        "mareforma", "mareforma.observe", "mareforma.trust",
+        "mareforma.signing", "mareforma.db", "mareforma.health",
+        "mareforma.validators",
+    ):
+        exported |= {
+            name for name in dir(importlib.import_module(module))
+            if not name.startswith("_")
+        }
+    stale = sorted(documented - live - exported)
+    assert not stale, (
+        "reference/api.mdx documents names nothing exports any more: "
+        + ", ".join(stale)
+    )
+
+
 def test_api_keeps_the_declared_and_observed_grounding_axes_apart():
     """The reference must not sell a self-declaration as a computed verdict.
 

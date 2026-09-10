@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+try:
+    import tomllib          # 3.11+ stdlib
+except ModuleNotFoundError:  # 3.10, where it is the tomli backport
+    import tomli as tomllib  # type: ignore[no-redef]
 from pathlib import Path
 
 import pytest
@@ -315,3 +319,97 @@ def test_non_scalar_trust_row_value_raises_trust_row_rejected(
         _db._restore_trust_tables(conn, data)
     assert exc_info.value.kind == "trust_row_rejected"
     assert "pid1" in str(exc_info.value)
+
+
+class TestARowSayingAHumanValidatedItCarriesTheProof:
+    """A claim can name a validator, or carry the envelope, or neither.
+
+    Naming one without the other is refused rather than tidied away. Dropping
+    the name quietly would rebuild a claim somebody was told had been validated
+    as one nobody signed off on, which is the difference this project exists to
+    keep visible.
+
+    The refusal existed with no test behind it. Every test naming its kind hit
+    the other site, where a signature fails to verify, so this shape was never
+    built and the branch could have gone at any point without a red run.
+    """
+
+    @staticmethod
+    def _backup_with(tmp_path: Path, **claim_fields) -> Path:
+        from tests._helpers import _bootstrap_key, rewrite_backup
+
+        key = _bootstrap_key(tmp_path, "root.key")
+        with mareforma.open(tmp_path, key_path=key) as g:
+            claim_id = g.assert_claim("a finding", generated_by="run")
+            g.backup()
+        doc = tomllib.loads((tmp_path / "claims.toml").read_text(encoding="utf-8"))
+        doc["claims"][claim_id].update(claim_fields)
+        dest = tmp_path.parent / (tmp_path.name + "-edited")
+        dest.mkdir()
+        (dest / "claims.toml").write_text(
+            (tmp_path / "claims.toml").read_text(encoding="utf-8"), encoding="utf-8",
+        )
+        rewrite_backup(dest / "claims.toml", doc)
+        return dest
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("validated_by", "somebody@example.org"),
+            ("validated_at", "2026-01-01T00:00:00+00:00"),
+        ],
+    )
+    def test_a_name_with_no_envelope_is_refused(
+        self, tmp_path: Path, field: str, value: str,
+    ) -> None:
+        dest = self._backup_with(tmp_path, **{field: value})
+        with pytest.raises(_db.RestoreError) as caught:
+            mareforma.restore(dest, trust_unaccounted_backup=True)
+        assert caught.value.kind == "claim_unverified"
+        assert "carries no validation envelope" in str(caught.value)
+
+    def test_neither_field_restores(self, tmp_path: Path) -> None:
+        """The shape the refusal must not catch: a claim nobody validated."""
+        dest = self._backup_with(tmp_path)
+        mareforma.restore(dest, trust_unaccounted_backup=True)
+
+
+class TestTheFormatGateIsNotOverridable:
+    """``format_ahead`` refuses whatever ``trust_unaccounted_backup`` says.
+
+    The flag exists for an operator who edited their own backup deliberately.
+    A file from a later format is a different problem: this reader cannot say
+    what the file owes, so it cannot say it is intact either, and upgrading is
+    the answer rather than overriding. The ordering carries that, and nothing
+    pinned it.
+    """
+
+    def test_the_override_does_not_wave_a_newer_format_through(self) -> None:
+        from mareforma.db.restore import (
+            _refuse_a_file_that_cannot_account_for_itself,
+        )
+        with pytest.raises(_db.RestoreError) as caught:
+            _refuse_a_file_that_cannot_account_for_itself(
+                ("format_ahead",), "claims.toml", True,
+            )
+        assert caught.value.kind == "format_ahead"
+
+    def test_the_override_still_waves_an_ordinary_shortfall_through(self) -> None:
+        """The other half, or the test above would pass on a gate that refuses
+        everything."""
+        from mareforma.db.restore import (
+            _refuse_a_file_that_cannot_account_for_itself,
+        )
+        _refuse_a_file_that_cannot_account_for_itself(
+            ("section_count_mismatch",), "claims.toml", True,
+        )
+
+    def test_without_the_override_the_shortfall_is_refused(self) -> None:
+        from mareforma.db.restore import (
+            _refuse_a_file_that_cannot_account_for_itself,
+        )
+        with pytest.raises(_db.RestoreError) as caught:
+            _refuse_a_file_that_cannot_account_for_itself(
+                ("section_count_mismatch",), "claims.toml", False,
+            )
+        assert caught.value.kind == "backup_unaccounted"
