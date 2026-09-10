@@ -226,7 +226,6 @@ graph.classify_supports(mixed)
   unsigned_claims        0
   unresolved_claims      0
   dangling_supports      0
-  convergence_errors     0
     f1af42da…                        claim
     10.1038/cure                     doi
     https://example.org/preprint     external

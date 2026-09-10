@@ -386,13 +386,13 @@ The last three subclass `MareformaError` directly, not `ValueError`.
 
 Single-call audit summary. Returns
 `{"claim_count", "validator_count", "unsigned_claims",
-"unresolved_claims", "dangling_supports", "convergence_errors"}`:
+"unresolved_claims", "dangling_supports"}`:
 int counts aggregating existing
 core surfaces. Pure observability, no side effects.
 
-A "healthy" graph has zeros across the four drift counters
-(`unsigned_claims`, `unresolved_claims`, `dangling_supports`,
-`convergence_errors`). Non-zero values
+A "healthy" graph has zeros across the three drift counters
+(`unsigned_claims`, `unresolved_claims`, `dangling_supports`).
+Non-zero values
 do not by themselves indicate a defect. They indicate something
 the operator should look at.
 

@@ -614,26 +614,12 @@ h = graph.health()
 #   "unsigned_claims": int,
 #   "unresolved_claims": int,
 #   "dangling_supports": int,
-#   "convergence_errors": int,
 # }
 ```
 
-A "healthy" graph has zeros across the four drift counters (`unsigned_claims`, `unresolved_claims`, `dangling_supports`, `convergence_errors`). Non-zero values don't by themselves indicate a defect; they indicate something the operator should look at.
+A "healthy" graph has zeros across the three drift counters (`unsigned_claims`, `unresolved_claims`, `dangling_supports`). Non-zero values don't by themselves indicate a defect; they indicate something the operator should look at.
 
-**Returns** `dict[str, int]` with the six keys above.
-
----
-
-### `convergence_errors`
-
-Read-only count of SQLite errors swallowed during convergence detection since the graph was opened.
-
-```python
-graph.convergence_errors  # 0
-```
-
-
-**Returns** `int`, reset to zero on every open.
+**Returns** `dict[str, int]` with the five keys above.
 
 ---
 

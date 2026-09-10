@@ -2644,7 +2644,6 @@ def add_claim(
     rekor_url: str | None = None,
     require_rekor: bool = False,
     trust_insecure_rekor: bool = False,
-    on_convergence_error: "Callable[[Exception], None] | None" = None,
     rekor_log_pubkey_pem: bytes | None = None,
     predicate_payload: dict | None = None,
     original_signature_bundle: str | None = None,

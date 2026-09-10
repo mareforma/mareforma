@@ -1539,7 +1539,6 @@ class TestHealth:
         "unresolved_claims",
         "unsigned_claims",
         "dangling_supports",
-        "convergence_errors",
     }
 
     def test_empty_graph_reports_zeros(self, tmp_path):
@@ -1551,7 +1550,6 @@ class TestHealth:
             assert h["unresolved_claims"] == 0
             assert h["unsigned_claims"] == 0
             assert h["dangling_supports"] == 0
-            assert h["convergence_errors"] == 0
 
     def test_claim_count_grows_with_inserts(self, tmp_path):
         with mareforma.open(tmp_path) as graph:

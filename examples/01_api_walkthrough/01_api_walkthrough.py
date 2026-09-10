@@ -270,7 +270,6 @@ show("validator_count", h["validator_count"])
 show("unsigned_claims", h["unsigned_claims"])
 show("unresolved_claims", h["unresolved_claims"])
 show("dangling_supports", h["dangling_supports"])
-show("convergence_errors", h["convergence_errors"])
 
 # graph.classify_supports(), see how the graph routes each entry
 # in a supports[] / contradicts[] list. Three buckets: claim (strict

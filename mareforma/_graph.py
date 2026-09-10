@@ -222,9 +222,6 @@ class EpistemicGraph:
         # Convergence detection swallows SQLite errors so a misconfigured
         # trigger or contention pattern cannot crash a write. A WARNING is
         # logged each time, but operators not watching logs would never know
-        # promotions stopped firing. Track the count here so it can be
-        # asserted in tests and surfaced in dashboards.
-        self._convergence_errors = 0
         # Rows a read dropped because their signature did not re-verify. The
         # enumerating surfaces cannot return them, so without this counter a
         # tampered graph reads as a graph with fewer claims.
@@ -551,9 +548,6 @@ class EpistemicGraph:
                     error=type(exc).__name__,
                 )
 
-        def _bump_convergence_errors(_exc: Exception) -> None:
-            self._convergence_errors += 1
-
         from mareforma.observe._binding import predicate_citation_sources
 
         # A claim asserted directly carries nothing to bind a verdict against:
@@ -602,7 +596,6 @@ class EpistemicGraph:
             rekor_url=self._rekor_url,
             require_rekor=self._require_rekor,
             trust_insecure_rekor=self._trust_insecure_rekor,
-            on_convergence_error=_bump_convergence_errors,
             rekor_log_pubkey_pem=self._rekor_log_pubkey_pem,
             predicate_payload=predicate_payload,
             original_signature_bundle=original_signature_bundle,
@@ -3498,23 +3491,6 @@ class EpistemicGraph:
     # ------------------------------------------------------------------
 
     @property
-    def convergence_errors(self) -> int:
-        """Number of swallowed SQLite errors during convergence detection.
-
-        Nothing advances this counter. The detector it mirrored ran after a
-        claim INSERT and swallowed SQLite errors so a misconfigured trigger
-        could never crash a write; that detector is gone, and the counter is
-        kept only so a caller reading ``health()`` finds the key it expects
-        rather than a KeyError.
-
-        Resets to zero each time the graph is re-opened. A non-zero value
-        means at least one assertion since open completed but its
-        promotion check did not run cleanly; inspect the warnings in the
-        ``mareforma`` logger for details.
-        """
-        return self._convergence_errors
-
-    @property
     def read_verify_exclusions(self) -> int:
         """Rows :meth:`query` and :meth:`search` dropped as unverifiable.
 
@@ -3560,12 +3536,9 @@ class EpistemicGraph:
             ``dangling_supports``: count of UUID-shaped ``supports[]``
             entries pointing to claims that do not exist in the graph
             (returned in detail by :meth:`find_dangling_supports`).
-            ``convergence_errors``: current value of the swallowed-
-            error counter (see :attr:`convergence_errors`).
 
         A "healthy" graph has zeros across ``unresolved_claims``,
-        ``unsigned_claims``, ``dangling_supports``,
-        and ``convergence_errors``.
+        ``unsigned_claims`` and ``dangling_supports``.
         Non-zero values do not by themselves indicate a defect: they
         indicate something the operator should look at.
         """
@@ -3597,7 +3570,6 @@ class EpistemicGraph:
             "unresolved_claims": unresolved_claims,
             "unsigned_claims": unsigned_claims,
             "dangling_supports": dangling_supports,
-            "convergence_errors": self._convergence_errors,
         }
 
     # ------------------------------------------------------------------
